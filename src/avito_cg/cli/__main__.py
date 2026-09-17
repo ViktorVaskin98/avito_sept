@@ -71,6 +71,14 @@ def _cmd_eda(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_split(args: argparse.Namespace) -> int:
+    """Собрать локальный бенчмарк из train и сохранить его"""
+    from avito_cg.cli.split import run
+
+    run(sanity=not args.no_sanity, seen_share=args.seen_share, seed=args.seed)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="avito-cg", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -80,6 +88,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     eda = subparsers.add_parser("eda", help="разбор данных: таблицы и графики")
     eda.set_defaults(func=_cmd_eda)
+
+    split = subparsers.add_parser("split", help="собрать локальный бенчмарк из train")
+    split.add_argument(
+        "--seen-share",
+        type=float,
+        default=0.096,
+        help="доля корпуса, знакомая обучающей части; 1.0 это наивный сплит",
+    )
+    split.add_argument("--seed", type=int, default=42)
+    split.add_argument("--no-sanity", action="store_true", help="пропустить контрольные модели")
+    split.set_defaults(func=_cmd_split)
 
     validate = subparsers.add_parser("validate-answer", help="проверить формат answer.csv")
     validate.add_argument("path", type=_resolve)

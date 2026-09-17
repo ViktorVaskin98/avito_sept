@@ -93,9 +93,7 @@ def lexical_coverage(report: pd.DataFrame, path: Path) -> Path:
         )
     ax.set_xlim(0, 1)
     ax.set_xlabel("доля пар «запрос - выбранное объявление»")
-    ax.legend(
-        loc="lower center", bbox_to_anchor=(0.5, -0.45), ncol=3, frameon=False, fontsize=9
-    )
+    ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.45), ncol=3, frameon=False, fontsize=9)
     ax.set_title("Лексический разрыв: что теряет поиск по словам")
     ax.grid(axis="y", visible=False)
     return _save(fig, path)
