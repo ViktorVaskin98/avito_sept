@@ -1,0 +1,58 @@
+[project]
+name = "avito-cg"
+version = "0.1.0"
+description = "Кандидатогенерация для поиска услуг на Авито: по поисковому запросу отобрать до 50 объявлений"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.1",
+    "pandas>=2.2",
+    "pyarrow>=17.0",
+    "scipy>=1.14",
+    "scikit-learn>=1.5",
+    "catboost>=1.2",
+    "torch>=2.4",
+    "transformers>=4.44",
+    "pystemmer>=2.2",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "matplotlib>=3.9",
+    "seaborn>=0.13",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "ipykernel>=6.29",
+    "jupyterlab>=4.2",
+]
+
+[project.scripts]
+avito-cg = "avito_cg.cli.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/avito_cg"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+warn_return_any = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
