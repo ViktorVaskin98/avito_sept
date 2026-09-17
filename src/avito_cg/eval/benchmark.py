@@ -100,11 +100,16 @@ class LocalBenchmark:
         повторяются для одного и того же объявления
         """
         wanted = columns or [name for name in ITEM_FEATURE_COLUMNS if name in train.columns]
-        # item_id уходит в индекс и возвращается обратно колонкой через reset_index,
-        # поэтому в списке запрашиваемых колонок его быть не должно
-        wanted = [name for name in wanted if name != "item_id"]
-        unique = train.drop_duplicates(subset="item_id").set_index("item_id")
-        return unique.loc[self.corpus_item_ids, wanted].reset_index()
+        unique = train.drop_duplicates(subset="item_id")
+
+        # выборка идёт через get_indexer, а не через .loc: item_id хранится как
+        # string[pyarrow], и .loc по такому индексу на 189 тысячах ключей уходит
+        # в медленный путь и висит минутами, тогда как get_indexer отрабатывает за 0.3 с
+        lookup = pd.Index(unique["item_id"].astype(object))
+        positions = lookup.get_indexer(self.corpus_item_ids)
+        if (positions < 0).any():
+            raise KeyError(f"в train нет {int((positions < 0).sum())} объявлений корпуса")
+        return unique.iloc[positions][wanted].reset_index(drop=True)
 
     def fit_pairs(self, train: pd.DataFrame) -> pd.DataFrame:
         """Пары, которыми разрешено обучаться: без отложенных запросов и без донора"""

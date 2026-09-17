@@ -17,6 +17,16 @@ from avito_cg.config import ID_LENGTH, TOP_K
 
 ITEM_ID_PATTERN = re.compile(rf"^[0-9a-f]{{{ID_LENGTH}}}$")
 
+# формат такое пропускает, метрика молча просядет. Ошибкой не считаю,
+# но и молчать о таком нельзя
+WARNING_PREFIXES = ("пустых ответов",)
+
+
+def split_problems(problems: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Разделить претензии на те, что ломают формат, и те, что просто стоят метрики"""
+    warnings = [p for p in problems if p.startswith(WARNING_PREFIXES)]
+    return [p for p in problems if p not in warnings], warnings
+
 
 class SubmissionError(ValueError):
     """Формат ответа нарушен, лучше упасть локально"""
@@ -122,7 +132,7 @@ def save_submission(
         corpus_item_ids=corpus_item_ids,
         top_k=top_k,
     )
-    blocking = [problem for problem in problems if not problem.startswith("пустых ответов")]
+    blocking, _ = split_problems(problems)
     if blocking:
         raise SubmissionError("; ".join(blocking))
     path.parent.mkdir(parents=True, exist_ok=True)

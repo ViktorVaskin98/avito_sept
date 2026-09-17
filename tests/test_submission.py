@@ -84,3 +84,26 @@ def test_wrong_columns_short_circuit():
     problems = validate_submission(frame, expected_query_ids=QUERY_IDS[:1])
     assert len(problems) == 1
     assert "колонки" in problems[0]
+
+
+def test_empty_answer_is_a_warning_not_an_error():
+    """Пустой ответ формат не ломает, но метрику стоит, поэтому он отдельной категорией"""
+    from avito_cg.eval.submission import split_problems
+
+    frame = build_submission({QUERY_IDS[0]: ITEMS[:1], QUERY_IDS[1]: []})
+    problems = validate_submission(frame, expected_query_ids=QUERY_IDS, corpus_item_ids=ITEMS)
+    errors, warnings = split_problems(problems)
+    assert errors == []
+    assert len(warnings) == 1
+    assert "пустых ответов" in warnings[0]
+
+
+def test_save_allows_empty_answers_but_not_broken_ids(tmp_path):
+    path = tmp_path / "answer.csv"
+    save_submission(
+        {QUERY_IDS[0]: ITEMS[:1], QUERY_IDS[1]: []},
+        path,
+        expected_query_ids=QUERY_IDS,
+        corpus_item_ids=ITEMS,
+    )
+    assert path.exists()

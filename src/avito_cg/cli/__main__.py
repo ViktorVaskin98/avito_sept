@@ -44,7 +44,7 @@ def _cmd_check_data(_: argparse.Namespace) -> int:
 def _cmd_validate_answer(args: argparse.Namespace) -> int:
     """Проверить готовый answer.csv перед отправкой на платформу"""
     from avito_cg.data.io import load_benchmark_items, load_benchmark_queries
-    from avito_cg.eval.submission import read_submission, validate_submission
+    from avito_cg.eval.submission import read_submission, split_problems, validate_submission
 
     frame = read_submission(args.path)
     queries = load_benchmark_queries(columns=["query_id"])
@@ -54,11 +54,14 @@ def _cmd_validate_answer(args: argparse.Namespace) -> int:
         expected_query_ids=queries["query_id"].astype(str).tolist(),
         corpus_item_ids=set(items["item_id"].astype(str)),
     )
-    if not problems:
+    errors, warnings = split_problems(problems)
+    for warning in warnings:
+        print(f"  внимание: {warning}", file=sys.stderr)
+    if not errors:
         print(f"{args.path}: формат в порядке, {len(frame)} строк")
         return 0
-    print(f"{args.path}: найдены проблемы", file=sys.stderr)
-    for problem in problems:
+    print(f"{args.path}: формат нарушен", file=sys.stderr)
+    for problem in errors:
         print(f"  - {problem}", file=sys.stderr)
     return 1
 
@@ -76,6 +79,31 @@ def _cmd_split(args: argparse.Namespace) -> int:
     from avito_cg.cli.split import run
 
     run(sanity=not args.no_sanity, seen_share=args.seen_share, seed=args.seed)
+    return 0
+
+
+def _cmd_baseline(args: argparse.Namespace) -> int:
+    """Прогнать BM25F на локальном бенчмарке"""
+    from avito_cg.cli.baseline import run
+
+    run(grid=not args.no_grid)
+    return 0
+
+
+def _cmd_answer(args: argparse.Namespace) -> int:
+    """Собрать answer.csv по настоящему корпусу"""
+    from avito_cg.cli.answer import run
+    from avito_cg.index.lexical import Field
+
+    run(
+        fields=[
+            Field("title", args.title, 0.6),
+            Field("params", args.params, 0.75),
+            Field("description", args.description, 0.75),
+        ],
+        output=args.out,
+        with_filter=args.with_filter,
+    )
     return 0
 
 
@@ -99,6 +127,18 @@ def build_parser() -> argparse.ArgumentParser:
     split.add_argument("--seed", type=int, default=42)
     split.add_argument("--no-sanity", action="store_true", help="пропустить контрольные модели")
     split.set_defaults(func=_cmd_split)
+
+    baseline = subparsers.add_parser("baseline", help="BM25F на локальном бенчмарке")
+    baseline.add_argument("--no-grid", action="store_true", help="пропустить подбор весов полей")
+    baseline.set_defaults(func=_cmd_baseline)
+
+    answer = subparsers.add_parser("make-answer", help="собрать answer.csv по настоящему корпусу")
+    answer.add_argument("--title", type=float, default=20.0, help="вес заголовка")
+    answer.add_argument("--params", type=float, default=0.5, help="вес параметров")
+    answer.add_argument("--description", type=float, default=1.0, help="вес описания")
+    answer.add_argument("--with-filter", action="store_true", help="дописать фильтр к запросу")
+    answer.add_argument("--out", type=_resolve, default=None)
+    answer.set_defaults(func=_cmd_answer)
 
     validate = subparsers.add_parser("validate-answer", help="проверить формат answer.csv")
     validate.add_argument("path", type=_resolve)

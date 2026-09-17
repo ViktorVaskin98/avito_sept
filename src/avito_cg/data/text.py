@@ -39,8 +39,13 @@ def normalize(text: str | None) -> str:
     """Нижний регистр, только буквы и цифры, одиночные пробелы
 
     ё схлопываю в е, в пользовательских запросах написание не устойчивое
+
+    Проверка на строку тут не для красоты: пустое описание приезжает из parquet
+    как NA, astype(str) на nullable-строке его не трогает, и в токенизатор
+    прилетает float('nan'), который к тому же истинный, так что «if not text» его
+    не ловит
     """
-    if not text:
+    if not isinstance(text, str) or not text:
         return ""
     lowered = text.lower().replace("ё", "е")
     cleaned = _NON_WORD.sub(" ", lowered)
