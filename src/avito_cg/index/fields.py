@@ -105,3 +105,32 @@ def query_texts(queries: pd.DataFrame, *, with_filter: bool = False) -> list[str
     if with_filter:
         text = text + " " + queries["search_infm_params_text"].fillna("").astype(str)
     return text.tolist()
+
+
+ENCODER_DESCRIPTION_CHARS = 250
+
+
+def encoder_texts(
+    items: pd.DataFrame,
+    parser: ParamsParser,
+    *,
+    description_chars: int = ENCODER_DESCRIPTION_CHARS,
+) -> list[str]:
+    """Текст объявления для би-энкодера
+
+    Отдельно от item_fields: у энкодера окно 128 токенов, и класть туда всё описание
+    бессмысленно, оно просто обрежется. Беру заголовок, фасетные значения и голову описания -
+    по EDA первые 250 символов описания дают примерно половину его вклада в лексическое
+    покрытие, а дальше идут условия работы и контакты
+    """
+    titles = items["item_title_raw"].fillna("").astype(str).tolist()
+    params = params_text(
+        parser,
+        items["item_infm_params_text"].fillna("").astype(str).tolist(),
+        include_address=False,
+    )
+    descriptions = items["item_description_raw"].fillna("").astype(str).tolist()
+    return [
+        ". ".join(part for part in (title, param, truncate(body, description_chars)) if part)
+        for title, param, body in zip(titles, params, descriptions, strict=True)
+    ]

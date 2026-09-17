@@ -6,10 +6,14 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+# по умолчанию корень это репозиторий, в котором лежит пакет, и при установке через
+# pip install -e так и получается. Но при обычной установке пакет уезжает в site-packages,
+# и корень вместе с ним, поэтому его можно переопределить снаружи. Нужно для Kaggle
+REPO_ROOT = Path(os.environ.get("AVITO_CG_ROOT") or Path(__file__).resolve().parents[2])
 
 # в answer.csv разрешено не больше 50 item_id на запрос
 TOP_K = 50

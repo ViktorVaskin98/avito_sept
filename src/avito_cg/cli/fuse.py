@@ -30,7 +30,13 @@ from avito_cg.index.fields import query_texts
 from avito_cg.index.geo import GeoIndex
 from avito_cg.index.lexical import BM25FIndex
 from avito_cg.retrieval.fusion import FusionConfig, retrieve
-from avito_cg.retrieval.signals import FacetSignal, GeoSignal, MicrocatSignal
+from avito_cg.retrieval.signals import (
+    DenseSignal,
+    FacetSignal,
+    GeoSignal,
+    MicrocatSignal,
+    load_embeddings,
+)
 
 COLUMNS = [
     "item_id",
@@ -44,9 +50,12 @@ TRAIN_COLUMNS = ["search_location_id", "search_query", "search_infm_params_text"
 GRIDS = {
     "фасеты": (0.0, 0.01, 0.02, 0.05, 0.10, 0.20),
     "микрокатегория": (0.0, 0.005, 0.01, 0.02, 0.05, 0.10),
+    "плотный": (0.0, 0.05, 0.1, 0.2, 0.35, 0.5, 0.8),
     "гео": (0.0, 0.02, 0.05, 0.10, 0.15, 0.20, 0.35),
 }
-START = {"гео": 0.10, "фасеты": 0.0, "микрокатегория": 0.0}
+START = {"гео": 0.10, "фасеты": 0.10, "микрокатегория": 0.02, "плотный": 0.0}
+EMBEDDINGS = "embeddings_local.npy"
+ENCODER = "encoder"
 
 
 def run(*, top_k: int = TOP_K) -> None:
@@ -64,6 +73,25 @@ def run(*, top_k: int = TOP_K) -> None:
         "микрокатегория": MicrocatSignal.build(local.queries, corpus, pairs),
     }
     del train, pairs
+
+    # плотный сигнал появляется только если эмбеддинги уже посчитаны на GPU,
+    # см. docs/KAGGLE.md. Без них всё остальное работает как раньше
+    embeddings = PATHS.artifacts / EMBEDDINGS
+    if embeddings.exists():
+        from avito_cg.train.biencoder import QUERY_PREFIX, encode
+
+        item_vectors = load_embeddings(embeddings, corpus["item_id"].astype(str).to_numpy())
+        query_vectors = encode(
+            local.queries["search_query"].fillna("").astype(str).tolist(),
+            PATHS.artifacts / ENCODER,
+            prefix=QUERY_PREFIX,
+            max_length=32,
+            device="cpu",
+        )
+        signals["плотный"] = DenseSignal(query_vectors=query_vectors, item_vectors=item_vectors)
+    else:
+        print(f"эмбеддингов нет в {embeddings}, плотный сигнал пропускаю", flush=True)
+
     print(f"сигналы готовы за {time.time() - started:.0f} c", flush=True)
 
     index = BM25FIndex.load(PATHS.artifacts / "lexical_local")
@@ -90,7 +118,7 @@ def run(*, top_k: int = TOP_K) -> None:
             local.relevant, predictions
         )
 
-    weights = dict(START)
+    weights = {name: value for name, value in START.items() if name in signals}
     base, previous = evaluate(weights)
     start_scores = previous
     print(f"исходная точка, только гео: {base:.4f}", flush=True)

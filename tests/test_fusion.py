@@ -125,3 +125,30 @@ def test_several_signals_are_summed(index, geo):
     geo_only = retrieve(index, [(signal(geo), 1.0)], ["маникюр"], top_k=4)
     with_flip = retrieve(index, [(signal(geo), 1.0), (Flip(), 100.0)], ["маникюр"], top_k=4)
     assert geo_only.tolist() != with_flip.tolist()
+
+
+def test_dense_signal_scores_by_cosine():
+    """Косинус нормированных векторов уже сравним между запросами, калибровать нечего"""
+    from avito_cg.retrieval.signals import DenseSignal
+
+    query_vectors = np.array([[1.0, 0.0]], dtype=np.float16)
+    item_vectors = np.array([[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0]], dtype=np.float16)
+    dense = DenseSignal(query_vectors=query_vectors, item_vectors=item_vectors)
+    scores = dense.score(0, np.array([0, 1, 2]))
+    assert scores[0] > scores[1] > scores[2]
+    assert scores[0] == pytest.approx(1.0)
+
+
+def test_embeddings_with_a_shuffled_order_are_rejected(tmp_path):
+    """Перепутанный порядок строк не проявится никак, кроме молча просевшей метрики"""
+    from avito_cg.retrieval.signals import load_embeddings
+
+    path = tmp_path / "embeddings.npy"
+    np.save(path, np.zeros((3, 4), dtype=np.float16))
+    np.save(tmp_path / "embeddings_item_ids.npy", np.array(["a", "b", "c"]))
+
+    assert load_embeddings(path, np.array(["a", "b", "c"])).shape == (3, 4)
+    with pytest.raises(ValueError, match="не соответствуют корпусу"):
+        load_embeddings(path, np.array(["a", "c", "b"]))
+    with pytest.raises(ValueError, match="не соответствуют корпусу"):
+        load_embeddings(path, np.array(["a", "b"]))

@@ -117,6 +117,40 @@ def _cmd_fuse(_: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_train_encoder(args: argparse.Namespace) -> int:
+    """Дообучить би-энкодер на разрешённых парах"""
+    from avito_cg.cli.encoder import run_training
+    from avito_cg.train.biencoder import TrainingConfig
+
+    run_training(
+        TrainingConfig(
+            model_name=args.model,
+            batch_size=args.batch_size,
+            epochs=args.epochs,
+            learning_rate=args.lr,
+            device=args.device,
+            max_pairs=args.max_pairs,
+            frozen_embeddings=args.freeze_embeddings,
+        ),
+        output=args.out,
+    )
+    return 0
+
+
+def _cmd_encode(args: argparse.Namespace) -> int:
+    """Закодировать корпус дообученным энкодером"""
+    from avito_cg.cli.encoder import run_encoding
+
+    run_encoding(
+        args.scope,
+        model_path=args.model,
+        output=args.out,
+        device=args.device,
+        batch_size=args.batch_size,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="avito-cg", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -144,6 +178,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     fuse = subparsers.add_parser("fuse", help="слияние лексики с гео на локальном бенчмарке")
     fuse.set_defaults(func=_cmd_fuse)
+
+    encoder = subparsers.add_parser("train-encoder", help="дообучить би-энкодер, нужен GPU")
+    encoder.add_argument("--model", default="intfloat/multilingual-e5-base")
+    encoder.add_argument("--batch-size", type=int, default=96)
+    encoder.add_argument("--epochs", type=int, default=2)
+    encoder.add_argument("--lr", type=float, default=2e-5)
+    encoder.add_argument("--device", default="auto", help="auto, cuda или cpu")
+    encoder.add_argument("--max-pairs", type=int, default=None, help="обрезать выборку для пробы")
+    encoder.add_argument(
+        "--freeze-embeddings", action="store_true", help="не обучать таблицу эмбеддингов"
+    )
+    encoder.add_argument("--out", type=_resolve, default=None)
+    encoder.set_defaults(func=_cmd_train_encoder)
+
+    encode = subparsers.add_parser("encode-corpus", help="закодировать корпус энкодером")
+    encode.add_argument("scope", choices=("local", "benchmark"))
+    encode.add_argument("--model", type=_resolve, default=None)
+    encode.add_argument("--device", default="auto")
+    encode.add_argument("--batch-size", type=int, default=256)
+    encode.add_argument("--out", type=_resolve, default=None)
+    encode.set_defaults(func=_cmd_encode)
 
     answer = subparsers.add_parser("make-answer", help="собрать answer.csv по настоящему корпусу")
     answer.add_argument("--title", type=float, default=20.0, help="вес заголовка")

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -249,6 +250,41 @@ class MicrocatSignal:
         result = np.full(candidates.size, self.unknown_penalty)
         result[known] = self.query_log_ratio[query, classes[known]]
         return result
+
+
+def load_embeddings(path: Path, item_ids: np.ndarray) -> np.ndarray:
+    """Прочитать эмбеддинги и убедиться, что порядок строк совпадает с корпусом
+
+    Без этой проверки перепутанный порядок не проявится никак: скоры останутся
+    правдоподобными, метрика просто молча просядет, и искать причину придётся долго
+    """
+    vectors = np.load(path)
+    saved = np.load(path.with_name(path.stem + "_item_ids.npy"), allow_pickle=True)
+    if len(saved) != len(item_ids) or not np.array_equal(saved.astype(str), item_ids.astype(str)):
+        raise ValueError(
+            f"эмбеддинги из {path.name} не соответствуют корпусу: "
+            f"{len(saved)} строк против {len(item_ids)}"
+        )
+    return vectors
+
+
+@dataclass(frozen=True, slots=True)
+class DenseSignal:
+    """Косинусная близость запроса и объявления по би-энкодеру
+
+    В отличие от BM25 косинус нормированных векторов уже сравним между запросами:
+    он лежит в [-1, 1] и не зависит ни от длины запроса, ни от редкости термов.
+    Поэтому здесь, в отличие от остальных сигналов, калибровать нечего, хватает веса
+    """
+
+    query_vectors: np.ndarray
+    item_vectors: np.ndarray
+    name: str = "плотный"
+
+    def score(self, query: int, candidates: np.ndarray) -> np.ndarray:
+        return self.item_vectors[candidates].astype(np.float32) @ self.query_vectors[query].astype(
+            np.float32
+        )
 
 
 def describe(signals: Sequence[tuple[Signal, float]]) -> str:

@@ -85,3 +85,21 @@ def test_paired_bootstrap_skips_queries_without_truth():
     after = np.array([1.0, 0.5, 1.0])
     delta, _, _ = paired_bootstrap(before, after)
     assert delta == pytest.approx(0.5)
+
+
+def test_root_can_be_overridden_by_environment(monkeypatch, tmp_path):
+    """При установке не в editable-режиме корень уезжает в site-packages
+
+    Наступил бы на это на Kaggle: пакет ставится через pip, а данные лежат рядом
+    с ноутбуком, и без переопределения avito-cg искал бы их внутри site-packages
+    """
+    import importlib
+
+    monkeypatch.setenv("AVITO_CG_ROOT", str(tmp_path))
+    import avito_cg.config as config
+
+    importlib.reload(config)
+    assert config.PATHS.raw == tmp_path / "data" / "raw"
+
+    monkeypatch.delenv("AVITO_CG_ROOT")
+    importlib.reload(config)
