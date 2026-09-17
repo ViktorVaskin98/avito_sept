@@ -74,6 +74,29 @@ def bootstrap_ci(
     return float(low), float(high)
 
 
+def paired_bootstrap(
+    before: np.ndarray,
+    after: np.ndarray,
+    *,
+    n_resamples: int = 5000,
+    alpha: float = 0.05,
+    seed: int = RANDOM_SEED,
+) -> tuple[float, float, float]:
+    """Разность двух конфигураций и её интервал, бутстрэпом по тем же запросам
+
+    Непарное сравнение тут врёт в сторону осторожности: обе конфигурации гоняются
+    на одной и той же выборке, и общая для них дисперсия по запросам сокращается.
+    Разница в 0.004 при ошибке каждой оценки 0.01 вполне может быть значимой,
+    а может и не быть, и отличить одно от другого можно только по разностям
+    """
+    mask = ~(np.isnan(before) | np.isnan(after))
+    difference = after[mask] - before[mask]
+    rng = np.random.default_rng(seed)
+    draws = rng.choice(difference, size=(n_resamples, difference.size), replace=True).mean(axis=1)
+    low, high = np.quantile(draws, [alpha / 2, 1 - alpha / 2])
+    return float(difference.mean()), float(low), float(high)
+
+
 def candidate_coverage(
     relevant: Mapping[str, Collection[str]],
     candidates: Mapping[str, Collection[str]],

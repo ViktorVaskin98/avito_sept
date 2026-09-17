@@ -94,6 +94,7 @@ def _cmd_answer(args: argparse.Namespace) -> int:
     """Собрать answer.csv по настоящему корпусу"""
     from avito_cg.cli.answer import run
     from avito_cg.index.lexical import Field
+    from avito_cg.retrieval.fusion import FusionConfig
 
     run(
         fields=[
@@ -103,7 +104,16 @@ def _cmd_answer(args: argparse.Namespace) -> int:
         ],
         output=args.out,
         with_filter=args.with_filter,
+        fusion=None if args.no_geo else FusionConfig(mode=args.fusion, geo_weight=args.geo_weight),
     )
+    return 0
+
+
+def _cmd_fuse(_: argparse.Namespace) -> int:
+    """Слияние BM25F с гео на локальном бенчмарке"""
+    from avito_cg.cli.fuse import run
+
+    run()
     return 0
 
 
@@ -132,11 +142,22 @@ def build_parser() -> argparse.ArgumentParser:
     baseline.add_argument("--no-grid", action="store_true", help="пропустить подбор весов полей")
     baseline.set_defaults(func=_cmd_baseline)
 
+    fuse = subparsers.add_parser("fuse", help="слияние лексики с гео на локальном бенчмарке")
+    fuse.set_defaults(func=_cmd_fuse)
+
     answer = subparsers.add_parser("make-answer", help="собрать answer.csv по настоящему корпусу")
     answer.add_argument("--title", type=float, default=20.0, help="вес заголовка")
     answer.add_argument("--params", type=float, default=0.5, help="вес параметров")
     answer.add_argument("--description", type=float, default=1.0, help="вес описания")
     answer.add_argument("--with-filter", action="store_true", help="дописать фильтр к запросу")
+    answer.add_argument("--no-geo", action="store_true", help="только лексика, без слияния с гео")
+    answer.add_argument(
+        "--fusion",
+        choices=("raw", "normalized", "rrf"),
+        default="normalized",
+        help="как согласовывать масштабы лексики и гео",
+    )
+    answer.add_argument("--geo-weight", type=float, default=0.10, help="вес гео в скоре")
     answer.add_argument("--out", type=_resolve, default=None)
     answer.set_defaults(func=_cmd_answer)
 

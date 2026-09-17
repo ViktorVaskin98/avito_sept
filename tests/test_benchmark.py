@@ -109,7 +109,7 @@ def test_seen_share_is_respected(local, train):
     assert abs(seen - 0.1) < 0.02
 
 
-def test_strata_matching_moves_empty_filter_share(train, benchmark_queries):
+def test_distribution_matching_moves_empty_filter_share(train, benchmark_queries):
     """Без перевзвешивания доля пустых фильтров тянется к train, с ним к бенчмарку"""
     target = (benchmark_queries["search_infm_params_text"].str.len() == 0).mean()
 
@@ -130,7 +130,7 @@ def test_strata_matching_moves_empty_filter_share(train, benchmark_queries):
         n_queries=N_QUERIES,
         corpus_size=CORPUS_SIZE,
         seen_share=0.1,
-        match_strata=False,
+        match_distribution=False,
         seed=7,
     )
     assert abs(empty_share(matched) - target) < abs(empty_share(plain) - target)
@@ -169,3 +169,42 @@ def test_impossible_split_fails_loudly(train, benchmark_queries):
             seen_share=0.1,
             seed=7,
         )
+
+
+def test_raking_matches_all_marginals_at_once():
+    """Раскинг должен согласовать выборку сразу по трём признакам, а не по одному
+
+    Именно это и было сломано в первой версии сплита: длина и фильтр совпадали,
+    а локация нет, и локальный корпус вокруг запросов оказался вдвое разреженнее
+    """
+    pool = pd.DataFrame(
+        {
+            "_location": [1] * 900 + [2] * 100,
+            "_empty_filter": ([True] * 450 + [False] * 450) + ([True] * 50 + [False] * 50),
+            "_words": list(range(1, 4)) * 333 + [1],
+        }
+    )
+    targets = {
+        "_location": {1: 0.3, 2: 0.7},
+        "_empty_filter": {True: 0.8, False: 0.2},
+    }
+    weights = bm.raking_weights(pool, targets)
+
+    for column, target in targets.items():
+        for value, share in target.items():
+            got = weights[pool[column].to_numpy() == value].sum() / weights.sum()
+            assert got == pytest.approx(share, abs=0.01), f"{column}={value}"
+
+
+def test_raking_zeroes_categories_absent_from_benchmark():
+    """Если по такой локации на платформе не ищут, в локальной выборке ей делать нечего"""
+    pool = pd.DataFrame({"_location": [1, 1, 2, 3]})
+    weights = bm.raking_weights(pool, {"_location": {1: 0.5, 2: 0.5}})
+    assert weights[3] == 0
+    assert weights[2] > 0
+
+
+def test_raking_refuses_an_impossible_target():
+    pool = pd.DataFrame({"_location": [7, 8]})
+    with pytest.raises(ValueError, match="ни один запрос"):
+        bm.raking_weights(pool, {"_location": {1: 1.0}})

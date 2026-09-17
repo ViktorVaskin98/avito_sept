@@ -13,11 +13,17 @@
 частью сплита: часть запросов уходит в пул-донор, их пары не участвуют в обучении вообще,
 а их объявления идут в корпус как незнакомые дистракторы.
 
-Второе. Запросы бенчмарка систематически другие: 3.20 слова против 2.45 и 63.1% пустых фильтров
-против 35.2%. Отложенные запросы поэтому набираю не случайно, а по совместному распределению
-(пустой фильтр, число слов), снятому с настоящих запросов бенчмарка. Разметки там нет,
-распределение признаков доступно легально, так что это обычное перевзвешивание по наблюдаемым
-ковариатам, а не подглядывание в ответы.
+Второе. Запросы бенчмарка систематически другие: 3.20 слова против 2.45, 63.1% пустых фильтров
+против 35.2%, и вдобавок они сконцентрированы в крупных городах. Последнее выяснилось не сразу
+и стоило дорого: первая версия сплита согласовывала только длину и фильтр, и локальный корпус
+вокруг запросов оказался вдвое разреженнее настоящего (медиана 1642 объявления в радиусе 25 км
+против 3261). Гео на таком сплите выглядит сильнее, чем оно есть.
+
+Поэтому отложенные запросы набираю раскингом: итеративно подгоняю веса так, чтобы выборка
+совпала с бенчмарком сразу по трём маргиналам - локация, наличие фильтра, число слов.
+Совместное распределение по 273 локациям на 2452 запросах не набрать, а маргиналы согласовать
+можно. Разметки в запросах бенчмарка нет, распределение признаков доступно легально,
+так что это обычное перевзвешивание по наблюдаемым ковариатам, а не подглядывание в ответы.
 """
 
 from __future__ import annotations
@@ -61,22 +67,60 @@ def _word_bin(text: str) -> int:
     return min(len(str(text).split()), WORD_BINS[-1] + 1)
 
 
-def _stratum(empty_filter: bool, words: int) -> tuple[bool, int]:
-    return empty_filter, words
+MATCHED_COLUMNS = ("_location", "_empty_filter", "_words")
+RAKING_ITERATIONS = 30
 
 
-def target_strata(benchmark_queries: pd.DataFrame) -> dict[tuple[bool, int], float]:
-    """Совместное распределение (пустой фильтр, число слов) у настоящих запросов"""
-    cells = Counter(
-        _stratum(len(str(params)) == 0, _word_bin(text))
-        for params, text in zip(
-            benchmark_queries["search_infm_params_text"].astype(str),
-            benchmark_queries["search_query"].astype(str),
-            strict=True,
-        )
-    )
-    total = sum(cells.values())
-    return {cell: count / total for cell, count in cells.items()}
+def _describe_queries(queries: pd.DataFrame) -> pd.DataFrame:
+    """Признаки, по которым согласую выборку с бенчмарком"""
+    frame = pd.DataFrame(index=queries.index)
+    frame["_location"] = queries["search_location_id"].to_numpy()
+    frame["_empty_filter"] = queries["search_infm_params_text"].astype(str).str.len() == 0
+    frame["_words"] = queries["search_query"].astype(str).map(_word_bin)
+    return frame
+
+
+def target_marginals(benchmark_queries: pd.DataFrame) -> dict[str, dict[object, float]]:
+    """Маргинальные распределения настоящих запросов по каждому признаку отдельно"""
+    described = _describe_queries(benchmark_queries)
+    return {
+        column: {
+            value: count / len(described)
+            for value, count in Counter(described[column].tolist()).items()
+        }
+        for column in MATCHED_COLUMNS
+    }
+
+
+def raking_weights(
+    pool: pd.DataFrame,
+    targets: dict[str, dict[object, float]],
+    *,
+    iterations: int = RAKING_ITERATIONS,
+) -> np.ndarray:
+    """Веса, при которых выборка совпадает с бенчмарком по всем маргиналам сразу
+
+    Обычный iterative proportional fitting: по очереди подгоняю каждый маргинал,
+    портя остальные, и повторяю до сходимости. Категории, которых в бенчмарке нет
+    вовсе, получают нулевой вес: если по такой локации там не ищут, то и в локальной
+    выборке ей делать нечего
+    """
+    weights = np.ones(len(pool), dtype=np.float64)
+    for column, target in targets.items():
+        weights[~pool[column].isin(target).to_numpy()] = 0.0
+    if weights.sum() == 0:
+        raise ValueError("ни один запрос обучения не подходит под распределение бенчмарка")
+
+    for _ in range(iterations):
+        for column, target in targets.items():
+            values = pool[column].to_numpy()
+            total = weights.sum()
+            for value, share in target.items():
+                mask = values == value
+                current = weights[mask].sum()
+                if current > 0:
+                    weights[mask] *= share * total / current
+    return weights
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,33 +195,23 @@ class LocalBenchmark:
 
 def _sample_queries(
     pool: pd.DataFrame,
-    strata: dict[tuple[bool, int], float],
+    targets: dict[str, dict[object, float]],
     n_queries: int,
     rng: np.random.Generator,
 ) -> np.ndarray:
-    """Набрать отложенные запросы по заданному распределению страт
+    """Отобрать запросы с вероятностью, пропорциональной раскинг-весам
 
-    Если в какой-то страте запросов меньше, чем просит распределение, беру сколько есть
-    и добираю недостачу пропорционально остальным. Такое случается на длинных редких
-    запросах, и об этом честнее сообщить в meta, чем молча промахнуться по распределению
+    Без замены: один и тот же запрос в выборке дважды не нужен
     """
-    cells = pool.groupby(["_empty_filter", "_words"]).indices
-    chosen: list[np.ndarray] = []
-    shortfall = 0
-    for cell, share in sorted(strata.items()):
-        wanted = round(share * n_queries)
-        available = cells.get(cell, np.array([], dtype=int))
-        take = min(wanted, len(available))
-        shortfall += wanted - take
-        if take:
-            chosen.append(rng.choice(available, size=take, replace=False))
-
-    picked = np.concatenate(chosen) if chosen else np.array([], dtype=int)
-    if shortfall > 0 or len(picked) < n_queries:
-        rest = np.setdiff1d(np.arange(len(pool)), picked)
-        extra = min(n_queries - len(picked), len(rest))
-        picked = np.concatenate([picked, rng.choice(rest, size=extra, replace=False)])
-    return picked[:n_queries]
+    weights = raking_weights(pool, targets)
+    eligible = np.flatnonzero(weights > 0)
+    if len(eligible) < n_queries:
+        raise ValueError(
+            f"под распределение бенчмарка подходит только {len(eligible)} запросов обучения "
+            f"из нужных {n_queries}"
+        )
+    probability = weights[eligible] / weights[eligible].sum()
+    return rng.choice(eligible, size=n_queries, replace=False, p=probability)
 
 
 def _split_donor(
@@ -227,7 +261,7 @@ def build(
     n_queries: int = N_QUERIES,
     corpus_size: int = CORPUS_SIZE,
     seen_share: float = SEEN_SHARE,
-    match_strata: bool = True,
+    match_distribution: bool = True,
     seed: int = RANDOM_SEED,
 ) -> LocalBenchmark:
     """Собрать локальный бенчмарк
@@ -242,12 +276,10 @@ def build(
 
     pool = train.drop_duplicates(subset=list(QUERY_KEY_COLUMNS))[list(QUERY_FEATURE_COLUMNS)].copy()
     pool["_key"] = query_key(pool).to_numpy()
-    pool["_empty_filter"] = pool["search_infm_params_text"].astype(str).str.len() == 0
-    pool["_words"] = pool["search_query"].astype(str).map(_word_bin)
-    pool = pool.reset_index(drop=True)
+    pool = pd.concat([pool, _describe_queries(pool)], axis=1).reset_index(drop=True)
 
-    if match_strata:
-        positions = _sample_queries(pool, target_strata(benchmark_queries), n_queries, rng)
+    if match_distribution:
+        positions = _sample_queries(pool, target_marginals(benchmark_queries), n_queries, rng)
     else:
         positions = rng.choice(len(pool), size=n_queries, replace=False)
     validation_keys = set(pool.loc[positions, "_key"])
@@ -307,10 +339,40 @@ def build(
         "обучающих пар": len(fit_rows),
         "пар в доноре": int(len(available_rows) - len(fit_rows)),
         "запросов в доноре": len(donor),
-        "перевзвешивание страт": match_strata,
+        "согласование распределений": match_distribution,
         "seed": seed,
     }
     return LocalBenchmark(queries, dict(relevant), corpus, fit_rows, meta)
+
+
+def corpus_density(
+    queries: pd.DataFrame, corpus: pd.DataFrame, train: pd.DataFrame, *, radius: float = 25.0
+) -> float:
+    """Медианное число объявлений корпуса в радиусе от центра поисковой локации
+
+    Прямая мера сложности задачи для гео. Если локально вокруг запросов вдвое
+    просторнее, чем на платформе, гео локально будет выглядеть вдвое умнее
+    """
+    from avito_cg.analysis import haversine, search_location_centroids
+
+    centroids = search_location_centroids(train)
+    located = queries.join(centroids, on="search_location_id")
+    query_latitude = located["latitude"].to_numpy(dtype=float)
+    query_longitude = located["longitude"].to_numpy(dtype=float)
+    item_latitude = corpus["item_latitude"].to_numpy(dtype=float)
+    item_longitude = corpus["item_longitude"].to_numpy(dtype=float)
+
+    counts: list[int] = []
+    for start in range(0, len(query_latitude), 128):
+        stop = min(start + 128, len(query_latitude))
+        distance = haversine(
+            query_latitude[start:stop, None],
+            query_longitude[start:stop, None],
+            item_latitude[None, :],
+            item_longitude[None, :],
+        )
+        counts.extend((distance <= radius).sum(axis=1).tolist())
+    return float(np.median(counts))
 
 
 def describe(
@@ -324,7 +386,9 @@ def describe(
     Это и есть проверка валидации: если какая-то строка сильно разъехалась,
     локальная метрика будет мерить не то, что платформенная
     """
-    corpus = local.corpus(train, columns=["item_location_id", "item_microcat_id"])
+    corpus = local.corpus(
+        train, columns=["item_location_id", "item_microcat_id", "item_latitude", "item_longitude"]
+    )
     sizes = np.array([len(items) for items in local.relevant.values()])
 
     def words(frame: pd.DataFrame) -> float:
@@ -350,6 +414,13 @@ def describe(
             "доля корпуса, знакомая обучению",
             round(local.meta["доля корпуса, знакомая обучению"], 3),
             "0.096",
+        ),
+        # прямая мера того, насколько локально сложнее или легче работать гео:
+        # именно эта величина разъехалась вдвое в первой версии сплита
+        (
+            "объявлений в радиусе 25 км, медиана",
+            int(corpus_density(local.queries, corpus, train)),
+            str(int(corpus_density(benchmark_queries, benchmark_items, train))),
         ),
         (
             "локаций в корпусе",

@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from avito_cg.eval.metrics import candidate_coverage, recall_at_k, recall_curve, recall_per_query
 
@@ -45,3 +46,42 @@ def test_candidate_coverage_ignores_top_k_cutoff():
     relevant = {"a": {"i99"}}
     candidates = {"a": [f"i{n}" for n in range(200)]}
     assert candidate_coverage(relevant, candidates) == 1.0
+
+
+def test_paired_bootstrap_detects_a_consistent_small_gain():
+    """Маленький, но систематический прирост должен быть значимым, а шум нет
+
+    Непарное сравнение такого не увидит: собственная дисперсия каждой оценки
+    на порядок больше разности
+    """
+    from avito_cg.eval.metrics import bootstrap_ci, paired_bootstrap
+
+    rng = np.random.default_rng(0)
+    before = rng.random(2452)
+    after = np.clip(before + 0.01, 0, 1)
+
+    delta, low, high = paired_bootstrap(before, after)
+    assert delta == pytest.approx(0.01, abs=0.001)
+    assert low > 0
+
+    wide = bootstrap_ci(before)
+    assert (wide[1] - wide[0]) > (high - low)
+
+
+def test_paired_bootstrap_calls_noise_insignificant():
+    from avito_cg.eval.metrics import paired_bootstrap
+
+    rng = np.random.default_rng(1)
+    before = rng.random(2452)
+    after = rng.random(2452)
+    _, low, high = paired_bootstrap(before, after)
+    assert low < 0 < high
+
+
+def test_paired_bootstrap_skips_queries_without_truth():
+    from avito_cg.eval.metrics import paired_bootstrap
+
+    before = np.array([0.0, np.nan, 1.0])
+    after = np.array([1.0, 0.5, 1.0])
+    delta, _, _ = paired_bootstrap(before, after)
+    assert delta == pytest.approx(0.5)

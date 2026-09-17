@@ -114,6 +114,22 @@ def _counts(
     return matrix, lengths
 
 
+def top_k_from_row(
+    indices: np.ndarray, scores: np.ndarray, top_k: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Топ-k по убыванию скора из ненулевых элементов одной строки
+
+    Плотная матрица 2452 на 189212 это 1.85 ГБ, а нулевые скоры в топ всё равно
+    не попадут, так что работаю прямо с ненулевыми
+    """
+    if scores.size == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32)
+    take = min(top_k, scores.size)
+    top = np.argpartition(-scores, take - 1)[:take]
+    top = top[np.argsort(-scores[top])]
+    return indices[top], scores[top]
+
+
 class BM25FIndex:
     """Индекс BM25F по нескольким полям с общим словарём"""
 
@@ -254,6 +270,20 @@ class BM25FIndex:
         combined.data = combined.data / (self.k1 + combined.data)
         self._matrix = combined.dot(sp.diags(self.idf)).tocsr().astype(np.float32)
 
+    def iter_scores(self, queries: Sequence[str], *, chunk: int = 256):
+        """Отдавать разреженные строки скоров блоками запросов
+
+        Нужно для слияния с другими сигналами: усечённый топ для этого не годится,
+        из 2 913 релевантных объявлений 395 не попадают даже в топ-1000 по одному
+        только тексту, и отрезав их на этом шаге, вернуть их уже нечем
+        """
+        if self._matrix is None:
+            raise RuntimeError("индекс не построен")
+        query_matrix = self._encode(queries)
+        for start in range(0, len(queries), chunk):
+            stop = min(start + chunk, len(queries))
+            yield start, (query_matrix[start:stop] @ self._matrix.T).tocsr()
+
     def search(
         self, queries: Sequence[str], *, top_k: int = 50, chunk: int = 256
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -263,27 +293,17 @@ class BM25FIndex:
         плотная матрица 2452 на 189212 это 1.85 ГБ, а нулевые скоры в топ всё равно
         не попадут
         """
-        if self._matrix is None:
-            raise RuntimeError("индекс не построен")
-
-        query_matrix = self._encode(queries)
         indices = np.full((len(queries), top_k), -1, dtype=np.int64)
         scores = np.zeros((len(queries), top_k), dtype=np.float32)
 
-        for start in range(0, len(queries), chunk):
-            stop = min(start + chunk, len(queries))
-            block = (query_matrix[start:stop] @ self._matrix.T).tocsr()
-            for row in range(stop - start):
+        for start, block in self.iter_scores(queries, chunk=chunk):
+            for row in range(block.shape[0]):
                 begin, end = block.indptr[row], block.indptr[row + 1]
-                row_scores = block.data[begin:end]
-                row_indices = block.indices[begin:end]
-                if row_scores.size == 0:
-                    continue
-                take = min(top_k, row_scores.size)
-                top = np.argpartition(-row_scores, take - 1)[:take]
-                top = top[np.argsort(-row_scores[top])]
-                indices[start + row, :take] = row_indices[top]
-                scores[start + row, :take] = row_scores[top]
+                top_indices, top_scores = top_k_from_row(
+                    block.indices[begin:end], block.data[begin:end], top_k
+                )
+                indices[start + row, : top_indices.size] = top_indices
+                scores[start + row, : top_scores.size] = top_scores
         return indices, scores
 
     def _encode(self, queries: Sequence[str]) -> sp.csr_matrix:

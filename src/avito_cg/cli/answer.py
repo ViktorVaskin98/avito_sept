@@ -1,8 +1,11 @@
 """Сборка answer.csv по настоящему корпусу
 
 Отдельная команда от baseline: там локальный бенчмарк, здесь настоящие 189 212 объявлений
-и 2 452 запроса без разметки. Веса полей приходят снаружи, чтобы отправляемая конфигурация
-была ровно той, которую я мерил локально, а не «примерно такой же»
+и 2 452 запроса без разметки. Конфигурация приходит снаружи, чтобы отправляемое было ровно тем,
+что я мерил локально, а не «примерно тем же».
+
+Гео здесь учится на всех обучающих парах, а не на fit_pairs: отложенных запросов на этой
+стороне нет, прятать не от кого.
 """
 
 from __future__ import annotations
@@ -14,10 +17,13 @@ from pathlib import Path
 import numpy as np
 
 from avito_cg.config import PATHS, TOP_K
-from avito_cg.data.io import load_benchmark_items, load_benchmark_queries
+from avito_cg.data.io import load_benchmark_items, load_benchmark_queries, load_train
 from avito_cg.eval.submission import save_submission
 from avito_cg.index.fields import PARAM_KEYS_FILE, item_fields, load_parser, query_texts
+from avito_cg.index.geo import GeoIndex
 from avito_cg.index.lexical import DEFAULT_FIELDS, BM25FIndex, Field
+from avito_cg.retrieval.fusion import DEFAULT_CONFIG, FusionConfig, retrieve
+from avito_cg.retrieval.signals import FacetSignal, GeoSignal, MicrocatSignal
 
 
 def run(
@@ -25,10 +31,13 @@ def run(
     fields: Sequence[Field] = DEFAULT_FIELDS,
     output: Path | None = None,
     with_filter: bool = False,
+    fusion: FusionConfig | None = DEFAULT_CONFIG,
+    weights: dict[str, float] | None = None,
     top_k: int = TOP_K,
 ) -> Path:
     PATHS.ensure()
     destination = output or PATHS.submissions / "answer.csv"
+    weights = weights or {"гео": 0.10, "фасеты": 0.0, "микрокатегория": 0.0}
 
     started = time.time()
     items = load_benchmark_items()
@@ -53,8 +62,44 @@ def run(
         print(f"индекс построен за {time.time() - started:.0f} c", flush=True)
 
     started = time.time()
-    order, _ = index.search(query_texts(queries, with_filter=with_filter), top_k=top_k)
-    print(f"поиск за {time.time() - started:.0f} c")
+    texts = query_texts(queries, with_filter=with_filter)
+    if fusion is None:
+        order, _ = index.search(texts, top_k=top_k)
+        print(f"поиск за {time.time() - started:.0f} c, только лексика", flush=True)
+    else:
+        train = load_train(
+            columns=[
+                "search_location_id",
+                "search_query",
+                "search_infm_params_text",
+                "item_latitude",
+                "item_longitude",
+                "item_microcat_id",
+                "item_infm_params_text",
+            ]
+        )
+        geo = GeoIndex.fit(train, items)
+        signals = [
+            (GeoSignal.build(geo, queries), weights["гео"]),
+            (FacetSignal.build(queries, items, train), weights["фасеты"]),
+            (MicrocatSignal.build(queries, items, train), weights["микрокатегория"]),
+        ]
+        del train
+        latitude, longitude = geo.query_coordinates(queries["search_location_id"].to_numpy())
+        order = retrieve(
+            index,
+            signals,
+            texts,
+            top_k=top_k,
+            config=fusion,
+            padding=geo,
+            query_coordinates=(latitude, longitude),
+        )
+        print(
+            f"поиск за {time.time() - started:.0f} c, лексика + "
+            + ", ".join(f"{signal.name}={weight}" for signal, weight in signals),
+            flush=True,
+        )
 
     item_ids = items["item_id"].astype(str).to_numpy()
     query_ids = queries["query_id"].astype(str).tolist()
