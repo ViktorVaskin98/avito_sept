@@ -63,12 +63,23 @@ def _cmd_validate_answer(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_eda(_: argparse.Namespace) -> int:
+    """Прогнать разбор данных: таблицы, графики и reports/eda.json"""
+    from avito_cg.cli.eda import run
+
+    run()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="avito-cg", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     check = subparsers.add_parser("check-data", help="проверить наличие исходных файлов")
     check.set_defaults(func=_cmd_check_data)
+
+    eda = subparsers.add_parser("eda", help="разбор данных: таблицы и графики")
+    eda.set_defaults(func=_cmd_eda)
 
     validate = subparsers.add_parser("validate-answer", help="проверить формат answer.csv")
     validate.add_argument("path", type=_resolve)

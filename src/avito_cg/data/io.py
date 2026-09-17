@@ -1,16 +1,3 @@
-"""Чтение исходных parquet
-
-Голым pd.read_parquet тут не обойтись, я наступил на три грабли подряд:
-
-1. train.parquet записан одной row group на 2.2 ГБ в распакованном виде. По группам его
-   не постримить, зато колоночное чтение работает отлично. Из 19 колонок почти всегда
-   нужны 3-5, а item_description_raw в одиночку весит больше половины файла
-2. item_price, item_latitude, item_longitude лежат как decimal128. pandas делает из них
-   объекты decimal.Decimal, это на порядок медленнее и тяжелее float64. Кастую на стороне arrow
-3. строки держу arrow-backed. Полмиллиона описаний в object-dtype это несколько гигабайт
-   на одних только заголовках Python-объектов
-"""
-
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -31,7 +18,6 @@ QUERY_FEATURE_COLUMNS: tuple[str, ...] = (
     "search_category",
 )
 
-# в train своего query_id нет, поэтому уникальный запрос это комбинация всех его признаков
 QUERY_KEY_COLUMNS: tuple[str, ...] = QUERY_FEATURE_COLUMNS
 
 ITEM_FEATURE_COLUMNS: tuple[str, ...] = (
@@ -128,9 +114,7 @@ def load_benchmark_items(
     """
     if columns is None:
         columns = [
-            name
-            for name in ITEM_FEATURE_COLUMNS
-            if with_description or name not in _HEAVY_COLUMNS
+            name for name in ITEM_FEATURE_COLUMNS if with_description or name not in _HEAVY_COLUMNS
         ]
     return read_parquet(PATHS.benchmark_items, columns)
 

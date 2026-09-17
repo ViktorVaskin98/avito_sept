@@ -1,15 +1,3 @@
-"""Нормализация текста запросов и объявлений
-
-Главная боль лексического поиска здесь это русская морфология: «перевозки» и «перевозка»,
-«юрист» и «юридические» для BM25 разные термы. Полную лемматизацию (pymorphy) я не беру:
-на 190 тысячах документов с описаниями она стоит дорого по времени, а поверх стеммера
-Snowball почти ничего не добавляет. То, что стеммер не вытягивает (опечатки, слитное
-написание, редкие формы), добираю отдельным индексом по символьным n-граммам
-
-Стемминг кэширую по уникальному токену: вхождений слов в корпусе порядка 10^7,
-а уникальных сотни тысяч, разница по времени примерно в двадцать раз
-"""
-
 from __future__ import annotations
 
 import re
@@ -19,7 +7,7 @@ from functools import lru_cache
 import pandas as pd
 
 try:
-    import Stemmer as _snowball
+    import Stemmer as _snowball  # noqa: N813
 
     _STEMMER = _snowball.Stemmer("russian")
 except ImportError:  # pragma: no cover
@@ -114,7 +102,9 @@ def join_fields(*fields: Iterable[str | None]) -> list[str]:
     length = len(columns[0])
     if any(len(column) != length for column in columns):
         raise ValueError("колонки разной длины")
-    return [" ".join(str(column[row]) for column in columns if column[row]) for row in range(length)]
+    return [
+        " ".join(str(column[row]) for column in columns if column[row]) for row in range(length)
+    ]
 
 
 def truncate(text: str | None, max_chars: int) -> str:
