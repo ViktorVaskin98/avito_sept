@@ -56,6 +56,8 @@ GRIDS = {
 START = {"гео": 0.10, "фасеты": 0.10, "микрокатегория": 0.02, "плотный": 0.0}
 EMBEDDINGS = "embeddings_local.npy"
 ENCODER = "encoder"
+DENSE_DEPTH = 200
+QUERY_VECTORS = "query_vectors_local.npy"
 
 
 def run(*, top_k: int = TOP_K) -> None:
@@ -81,13 +83,22 @@ def run(*, top_k: int = TOP_K) -> None:
         from avito_cg.train.biencoder import QUERY_PREFIX, encode
 
         item_vectors = load_embeddings(embeddings, corpus["item_id"].astype(str).to_numpy())
-        query_vectors = encode(
-            local.queries["search_query"].fillna("").astype(str).tolist(),
-            PATHS.artifacts / ENCODER,
-            prefix=QUERY_PREFIX,
-            max_length=32,
-            device="cpu",
-        )
+
+        # запросов всего 2452, но на CPU моделью в 278М параметров это несколько минут,
+        # и повторять их на каждом прогоне незачем
+        cache = PATHS.artifacts / QUERY_VECTORS
+        if cache.exists():
+            query_vectors = np.load(cache)
+            print(f"векторы запросов из кэша: {query_vectors.shape}", flush=True)
+        else:
+            query_vectors = encode(
+                local.queries["search_query"].fillna("").astype(str).tolist(),
+                PATHS.artifacts / ENCODER,
+                prefix=QUERY_PREFIX,
+                max_length=32,
+                device="cpu",
+            )
+            np.save(cache, query_vectors)
         signals["плотный"] = DenseSignal(query_vectors=query_vectors, item_vectors=item_vectors)
     else:
         print(f"эмбеддингов нет в {embeddings}, плотный сигнал пропускаю", flush=True)
@@ -99,13 +110,16 @@ def run(*, top_k: int = TOP_K) -> None:
     query_ids = local.query_ids
     texts = query_texts(local.queries)
 
-    def rank(weights: dict[str, float], depth: int) -> dict[str, list[str]]:
+    def rank(
+        weights: dict[str, float], depth: int, extra: np.ndarray | None = None
+    ) -> dict[str, list[str]]:
         order = retrieve(
             index,
             [(signals[name], weight) for name, weight in weights.items()],
             texts,
             top_k=depth,
             config=FusionConfig(mode="normalized"),
+            extra_candidates=extra,
         )
         return {
             query: [item_ids[position] for position in row if position >= 0]
@@ -146,7 +160,29 @@ def run(*, top_k: int = TOP_K) -> None:
     delta, low, high = paired_bootstrap(start_scores, per_query)
     print(f"прирост к одному гео: {delta:+.4f} [{low:+.4f}, {high:+.4f}]")
 
-    curve = recall_curve(local.relevant, rank(weights, 1000), ks=(1, 10, 50, 100, 200, 500, 1000))
+    # плотный поиск как источник кандидатов, а не только как переупорядочиватель.
+    # меряю отдельным замером: 3.0% пар по разбору данных не имеют с объявлением ни одного
+    # общего токена, лексика их не находит в принципе, и переупорядочивание тут бессильно
+    extra = None
+    if "плотный" in signals and weights.get("плотный"):
+        print("\nПлотный поиск как источник кандидатов", flush=True)
+        started_dense = time.time()
+        extra = signals["плотный"].top_candidates(top_k=DENSE_DEPTH)
+        print(f"  топ-{DENSE_DEPTH} по косинусу за {time.time() - started_dense:.0f} c", flush=True)
+
+        with_extra = rank(weights, top_k, extra)
+        scores_extra = recall_per_query(local.relevant, with_extra)
+        delta, low, high = paired_bootstrap(per_query, scores_extra)
+        verdict = "значимо" if low > 0 else "в пределах шума"
+        print(f"  Recall@50 = {recall_at_k(local.relevant, with_extra):.4f}")
+        print(f"  прирост {delta:+.4f} [{low:+.4f}, {high:+.4f}], {verdict}")
+        if low <= 0:
+            extra = None
+            print("  кандидатов от плотного поиска не добавляю")
+
+    curve = recall_curve(
+        local.relevant, rank(weights, 1000, extra), ks=(1, 10, 50, 100, 200, 500, 1000)
+    )
     print("\nГлубина кандидатов")
     print(
         pd.DataFrame([{"k": k, "Recall@k": round(v, 4)} for k, v in curve.items()]).to_string(

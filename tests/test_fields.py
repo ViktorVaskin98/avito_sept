@@ -1,7 +1,7 @@
 import pandas as pd
 
 from avito_cg.data.params import ParamsParser
-from avito_cg.index.fields import item_fields, params_text, query_texts
+from avito_cg.index.fields import encoder_texts, item_fields, params_text, query_texts
 
 PARSER = ParamsParser(
     ["Вид услуги", "Тип услуги", "Место оказания услуг", "Опыт работы", "График работы от"]
@@ -83,3 +83,45 @@ def test_normalize_survives_non_text():
     assert normalize(float("nan")) == ""
     assert normalize(None) == ""
     assert tokenize(float("nan")) == []
+
+
+def test_time_values_are_dropped():
+    """«09:30» не ловится проверкой на цифры, а в параметрах его много"""
+    from avito_cg.index.fields import params_values
+
+    parser = ParamsParser(["Время работы, с", "Вид услуги"])
+    values = params_values(parser, ["Время работы, с 09:30 Вид услуги Ремонт"])[0]
+    assert "09:30" not in values
+    assert "Ремонт" in values
+
+
+def test_frequent_values_are_detected_by_share():
+    """Отбираю мусорные значения по доле объявлений, а не чёрным списком"""
+    from avito_cg.index.fields import frequent_values
+
+    values = [
+        ["Начальная цена", "Сантехника"],
+        ["Начальная цена", "Электрика"],
+        ["Начальная цена", "Кровля"],
+        ["Начальная цена", "Плитка"],
+    ]
+    common = frequent_values(values, max_share=0.5)
+    assert common == {"Начальная цена"}
+
+
+def test_encoder_text_drops_common_values_but_keeps_rare_ones():
+    parser = ParamsParser(["Вид услуги", "Тип стоимости за услугу"])
+    items = pd.DataFrame(
+        {
+            "item_title_raw": ["Маникюр", "Электрика"],
+            "item_infm_params_text": [
+                "Вид услуги Красота Тип стоимости за услугу Начальная цена",
+                "Вид услуги Ремонт Тип стоимости за услугу Начальная цена",
+            ],
+            "item_description_raw": ["", ""],
+        }
+    )
+    texts = encoder_texts(items, parser, max_value_share=0.5)
+    assert "Начальная цена" not in texts[0]
+    assert "Красота" in texts[0]
+    assert "Ремонт" in texts[1]

@@ -28,6 +28,21 @@ BIN_EDGES = np.array(
 )
 SMOOTHING = 20.0
 
+# Ограничение штрафа снизу. Гипотеза была такая: калибровка учится на обучающих парах,
+# где 93% объявлений внутри 25 км, поэтому дальним достаётся слишком сильный отрицательный
+# скор, и правильное далёкое объявление выдавливается даже при идеальном совпадении текста.
+# Разбор промахов это подтверждал: за 25 км доля попаданий падает с 0.92 до 0.46.
+#
+# Проверка гипотезу опровергла. Ослабление штрафа ухудшает метрику монотонно:
+# -inf даёт 0.9132, -4.0 даёт 0.9121, -3.0 даёт 0.9101, -2.0 даёт 0.9010. Причина в том,
+# что вместе с далёкими правильными в ответ лезут далёкие неправильные, и их больше.
+# Калибровка оказалась примерно верной, а проблему дальних глобальной правкой кривой
+# не решить: нужна условная поправка вида «ослабь гео, если текст совпал отлично»,
+# а это уже взаимодействие, и оно за пределами взвешенной суммы.
+#
+# Параметр оставлен выключенным: он документирует проверенную и отвергнутую гипотезу
+PENALTY_FLOOR = -np.inf
+
 
 @dataclass(frozen=True, slots=True)
 class GeoIndex:
@@ -38,6 +53,7 @@ class GeoIndex:
     item_latitude: np.ndarray
     item_longitude: np.ndarray
     log_ratio: np.ndarray
+    penalty_floor: float = PENALTY_FLOOR
 
     @classmethod
     def fit(
@@ -159,4 +175,5 @@ class GeoIndex:
         """
         bins = np.digitize(np.nan_to_num(distance, nan=np.inf), BIN_EDGES) - 1
         bins = np.clip(bins, 0, len(self.log_ratio) - 1)
-        return np.where(np.isnan(distance), 0.0, self.log_ratio[bins])
+        scores = np.maximum(self.log_ratio[bins], self.penalty_floor)
+        return np.where(np.isnan(distance), 0.0, scores)

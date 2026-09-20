@@ -84,8 +84,16 @@ def retrieve(
     chunk: int = 128,
     padding: GeoIndex | None = None,
     query_coordinates: tuple[np.ndarray, np.ndarray] | None = None,
+    extra_candidates: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Индексы строк корпуса, по убыванию итогового скора, -1 на пустых местах"""
+    """Индексы строк корпуса, по убыванию итогового скора, -1 на пустых местах
+
+    extra_candidates добавляет к лексическим кандидатам ещё по строке индексов на запрос.
+    Это нужно плотному поиску: как сигнал он умеет только переупорядочивать найденное
+    лексикой, а 3.0% пар по разбору данных не имеют с объявлением ни одного общего токена
+    и в лексическое множество не попадают вовсе. Достать их можно, только если плотный
+    поиск ещё и порождает кандидатов
+    """
     result = np.full((len(texts), top_k), -1, dtype=np.int64)
 
     for start, block in index.iter_scores(texts, chunk=chunk):
@@ -93,10 +101,21 @@ def retrieve(
             query = start + row
             begin, end = block.indptr[row], block.indptr[row + 1]
             candidates = block.indices[begin:end]
+            lexical = block.data[begin:end].astype(np.float64)
+
+            if extra_candidates is not None:
+                extra = extra_candidates[query]
+                extra = extra[extra >= 0]
+                # у пришедших только из плотного поиска лексического скора нет,
+                # и это честный ноль: текст запроса с ними действительно не пересёкся
+                fresh = np.setdiff1d(extra, candidates, assume_unique=False)
+                candidates = np.concatenate([candidates, fresh])
+                lexical = np.concatenate([lexical, np.zeros(fresh.size)])
+
             if candidates.size == 0:
                 continue
 
-            combined = _lexical_component(block.data[begin:end].astype(np.float64), config)
+            combined = _lexical_component(lexical, config)
             for signal, weight in signals:
                 if weight:
                     combined = combined + _signal_component(

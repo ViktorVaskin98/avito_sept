@@ -259,11 +259,18 @@ def load_embeddings(path: Path, item_ids: np.ndarray) -> np.ndarray:
     правдоподобными, метрика просто молча просядет, и искать причину придётся долго
     """
     vectors = np.load(path)
-    saved = np.load(path.with_name(path.stem + "_item_ids.npy"), allow_pickle=True)
-    if len(saved) != len(item_ids) or not np.array_equal(saved.astype(str), item_ids.astype(str)):
+    saved = np.load(path.with_name(path.stem + "_item_ids.npy"), allow_pickle=True).astype(str)
+    expected = item_ids.astype(str)
+    if len(saved) != len(expected):
         raise ValueError(
-            f"эмбеддинги из {path.name} не соответствуют корпусу: "
-            f"{len(saved)} строк против {len(item_ids)}"
+            f"в {path.name} {len(saved)} строк, а в корпусе {len(expected)} объявлений"
+        )
+    if not np.array_equal(saved, expected):
+        mismatched = int((saved != expected).sum())
+        raise ValueError(
+            f"порядок строк в {path.name} не совпадает с корпусом: расходится {mismatched} "
+            f"из {len(expected)}, первое расхождение на позиции "
+            f"{int(np.flatnonzero(saved != expected)[0])}"
         )
     return vectors
 
@@ -285,6 +292,28 @@ class DenseSignal:
         return self.item_vectors[candidates].astype(np.float32) @ self.query_vectors[query].astype(
             np.float32
         )
+
+    def top_candidates(self, top_k: int = 200, chunk: int = 64) -> np.ndarray:
+        """Лучшие кандидаты по косинусу для каждого запроса, по всему корпусу
+
+        Нужно потому, что как сигнал плотный поиск умеет только переупорядочивать
+        найденное лексикой, а 3.0% пар по разбору данных не имеют с объявлением
+        ни одного общего токена и в лексическое множество не попадают вовсе.
+
+        Приближённый поиск не нужен: 2452 на 189212 на 768 это меньше терафлопа,
+        BLAS считает это за минуту. Матрицу скоров держу блоками, целиком она заняла бы
+        почти два гигабайта
+        """
+        items = self.item_vectors.astype(np.float32)
+        result = np.full((len(self.query_vectors), top_k), -1, dtype=np.int64)
+        for start in range(0, len(self.query_vectors), chunk):
+            stop = min(start + chunk, len(self.query_vectors))
+            scores = self.query_vectors[start:stop].astype(np.float32) @ items.T
+            take = min(top_k, scores.shape[1])
+            top = np.argpartition(-scores, take - 1, axis=1)[:, :take]
+            order = np.argsort(-np.take_along_axis(scores, top, axis=1), axis=1)
+            result[start:stop, :take] = np.take_along_axis(top, order, axis=1)
+        return result
 
 
 def describe(signals: Sequence[tuple[Signal, float]]) -> str:

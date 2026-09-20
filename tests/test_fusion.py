@@ -140,7 +140,11 @@ def test_dense_signal_scores_by_cosine():
 
 
 def test_embeddings_with_a_shuffled_order_are_rejected(tmp_path):
-    """Перепутанный порядок строк не проявится никак, кроме молча просевшей метрики"""
+    """Перепутанный порядок строк не проявится никак, кроме молча просевшей метрики
+
+    Поэтому сообщение должно отличать «не тот размер» от «не тот порядок»:
+    в первом случае ищешь не тот файл, во втором не тот корпус
+    """
     from avito_cg.retrieval.signals import load_embeddings
 
     path = tmp_path / "embeddings.npy"
@@ -148,7 +152,50 @@ def test_embeddings_with_a_shuffled_order_are_rejected(tmp_path):
     np.save(tmp_path / "embeddings_item_ids.npy", np.array(["a", "b", "c"]))
 
     assert load_embeddings(path, np.array(["a", "b", "c"])).shape == (3, 4)
-    with pytest.raises(ValueError, match="не соответствуют корпусу"):
+
+    with pytest.raises(ValueError, match="порядок строк"):
         load_embeddings(path, np.array(["a", "c", "b"]))
-    with pytest.raises(ValueError, match="не соответствуют корпусу"):
+
+    with pytest.raises(ValueError, match="3 строк, а в корпусе 2"):
         load_embeddings(path, np.array(["a", "b"]))
+
+
+def test_dense_top_candidates_ranks_the_whole_corpus():
+    """Плотный поиск должен уметь порождать кандидатов, а не только переупорядочивать"""
+    from avito_cg.retrieval.signals import DenseSignal
+
+    query_vectors = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float16)
+    item_vectors = np.array([[1.0, 0.0], [0.7, 0.7], [0.0, 1.0], [-1.0, 0.0]], dtype=np.float16)
+    dense = DenseSignal(query_vectors=query_vectors, item_vectors=item_vectors)
+    top = dense.top_candidates(top_k=3)
+    assert top.shape == (2, 3)
+    assert top[0, 0] == 0
+    assert top[1, 0] == 2
+    assert 3 not in top[0].tolist()[:2]
+
+
+def test_extra_candidates_reach_items_lexical_search_never_saw(index, geo):
+    """Объявление без общих токенов с запросом лексикой недостижимо в принципе"""
+    lexical_only = retrieve(index, [(signal(geo), 0.0)], ["совершенно другое"], top_k=3)
+    assert (lexical_only == -1).all()
+
+    rescued = retrieve(
+        index,
+        [(signal(geo), 0.0)],
+        ["совершенно другое"],
+        top_k=3,
+        extra_candidates=np.array([[2, 3, -1]]),
+    )
+    assert sorted(x for x in rescued[0].tolist() if x >= 0) == [2, 3]
+
+
+def test_extra_candidates_do_not_duplicate_lexical_ones(index, geo):
+    order = retrieve(
+        index,
+        [(signal(geo), 1.0)],
+        ["маникюр"],
+        top_k=4,
+        extra_candidates=np.array([[0, 1, 2, 3]]),
+    )
+    found = [x for x in order[0].tolist() if x >= 0]
+    assert len(found) == len(set(found))

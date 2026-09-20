@@ -13,23 +13,36 @@
 # Нужен GPU (T4) и включённый Internet. Датасет с тремя parquet подключается
 # как `/kaggle/input/avito-sept`.
 
-# %% ячейка 1: установка пакета
-# !pip install -q git+https://github.com/ViktorVaskin98/avito_sept.git
+# %% ячейка 1: репозиторий
+# GIT_TERMINAL_PROMPT=0 обязателен: у приватного репозитория git спросит логин,
+# отвечать ему в ноутбуке некому, и ячейка зависнет навсегда без сообщений
+# !GIT_TERMINAL_PROMPT=0 git clone -q https://github.com/ViktorVaskin98/avito_sept.git /kaggle/working/avito
+# !pip install -q -e /kaggle/working/avito
 
 # %% ячейка 2: подключение данных
 import os
-import shutil
+import sys
 from pathlib import Path
 
 WORK = Path("/kaggle/working/avito")
-RAW = WORK / "data" / "raw"
-RAW.mkdir(parents=True, exist_ok=True)
+(WORK / "data").mkdir(parents=True, exist_ok=True)
 
-SOURCE = Path("/kaggle/input/avito-sept")
-for name in ("train.parquet", "benchmark_items.parquet", "benchmark_queries.parquet"):
-    target = RAW / name
-    if not target.exists():
-        shutil.copy(SOURCE / name, target)
+# редактируемая установка кладёт .pth в site-packages, а он читается только при старте
+# интерпретатора, поэтому работающее ядро пакета не видит
+sys.path.insert(0, str(WORK / "src"))
+
+# путь монтирования зависит от слага датасета, а не от названия в панели
+found = {path.name: path for path in Path("/kaggle/input").rglob("*.parquet")}
+print("нашёл:", {name: str(path) for name, path in found.items()})
+
+RAW = WORK / "data" / "raw"
+if not RAW.exists():
+    # симлинк вместо копии: 686 МБ незачем таскать, /kaggle/input нужен только на чтение
+    RAW.symlink_to(found["train.parquet"].parent, target_is_directory=True)
+
+# корень проекта считается от расположения пакета, и при установке не в editable-режиме
+# он уехал бы в site-packages вместе с ним
+os.environ["AVITO_CG_ROOT"] = str(WORK)
 os.chdir(WORK)
 print(sorted(path.name for path in RAW.iterdir()))
 

@@ -23,7 +23,13 @@ from avito_cg.index.fields import PARAM_KEYS_FILE, item_fields, load_parser, que
 from avito_cg.index.geo import GeoIndex
 from avito_cg.index.lexical import DEFAULT_FIELDS, BM25FIndex, Field
 from avito_cg.retrieval.fusion import DEFAULT_CONFIG, FusionConfig, retrieve
-from avito_cg.retrieval.signals import FacetSignal, GeoSignal, MicrocatSignal
+from avito_cg.retrieval.signals import (
+    DenseSignal,
+    FacetSignal,
+    GeoSignal,
+    MicrocatSignal,
+    load_embeddings,
+)
 
 
 def run(
@@ -37,7 +43,8 @@ def run(
 ) -> Path:
     PATHS.ensure()
     destination = output or PATHS.submissions / "answer.csv"
-    weights = weights or {"гео": 0.10, "фасеты": 0.0, "микрокатегория": 0.0}
+    # подобраны на локальном бенчмарке покоординатным спуском, см. docs/EXPERIMENTS.md
+    weights = weights or {"гео": 0.10, "фасеты": 0.10, "микрокатегория": 0.02, "плотный": 0.5}
 
     started = time.time()
     items = load_benchmark_items()
@@ -85,6 +92,33 @@ def run(
             (MicrocatSignal.build(queries, items, train), weights["микрокатегория"]),
         ]
         del train
+
+        # плотный поиск подключается, только если эмбеддинги посчитаны, см. docs/KAGGLE.md
+        extra = None
+        embeddings = PATHS.artifacts / "embeddings_benchmark.npy"
+        if weights.get("плотный") and embeddings.exists():
+            from avito_cg.train.biencoder import QUERY_PREFIX, encode
+
+            item_vectors = load_embeddings(embeddings, items["item_id"].astype(str).to_numpy())
+            cache = PATHS.artifacts / "query_vectors_benchmark.npy"
+            if cache.exists():
+                query_vectors = np.load(cache)
+            else:
+                query_vectors = encode(
+                    queries["search_query"].fillna("").astype(str).tolist(),
+                    PATHS.artifacts / "encoder",
+                    prefix=QUERY_PREFIX,
+                    max_length=32,
+                    device="cpu",
+                )
+                np.save(cache, query_vectors)
+            dense = DenseSignal(query_vectors=query_vectors, item_vectors=item_vectors)
+            signals.append((dense, weights["плотный"]))
+            # плотный поиск не только переупорядочивает, но и приводит кандидатов,
+            # до которых лексика не дотягивается вовсе
+            extra = dense.top_candidates(top_k=200)
+        elif weights.get("плотный"):
+            print(f"эмбеддингов нет в {embeddings}, плотный сигнал пропускаю", flush=True)
         latitude, longitude = geo.query_coordinates(queries["search_location_id"].to_numpy())
         order = retrieve(
             index,
@@ -94,6 +128,7 @@ def run(
             config=fusion,
             padding=geo,
             query_coordinates=(latitude, longitude),
+            extra_candidates=extra,
         )
         print(
             f"поиск за {time.time() - started:.0f} c, лексика + "

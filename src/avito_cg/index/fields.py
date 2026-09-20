@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import re
 import time
+from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -45,30 +47,60 @@ def load_parser(
     return parser
 
 
+_TIME = re.compile(r"^\d{1,2}[:.]\d{2}$")
+
+
 def _numeric(value: str) -> bool:
+    """Числовые и временные значения смысла не несут
+
+    Время проверяю отдельно: «09:30» не ловится проверкой на цифры, а в параметрах
+    его много, это график работы и время для связи
+    """
+    if _TIME.match(value):
+        return True
     return value.replace(".", "", 1).replace(",", "", 1).isdigit()
+
+
+def params_values(
+    parser: ParamsParser, raw: Sequence[str], *, include_address: bool = True
+) -> list[list[str]]:
+    """Осмысленные значения параметров, по списку на объявление
+
+    Адрес держу по умолчанию: в запросах регулярно встречаются названия городов
+    («перевозки владикавказ тбилиси»), и они действительно попадают в адрес исполнителя
+    """
+    return [
+        [
+            value
+            for key, values in parser.parse(text).values.items()
+            if include_address or key != ADDRESS_KEY
+            for value in values
+            if value and not _numeric(value)
+        ]
+        for text in raw
+    ]
+
+
+def frequent_values(values: Sequence[Sequence[str]], *, max_share: float = 0.2) -> set[str]:
+    """Значения параметров, которые встречаются у слишком многих объявлений
+
+    «Начальная цена» или «Тип стоимости за услугу» стоят почти везде и не различают
+    ничего, а место в окне энкодера занимают. Отбираю их по доле объявлений, а не
+    чёрным списком: список пришлось бы вести руками и он развалился бы на новых данных.
+    По сути это тот же idf, только на уровне значений, а не токенов
+    """
+    counter: Counter[str] = Counter()
+    for row in values:
+        counter.update(set(row))
+    limit = max_share * len(values)
+    return {value for value, count in counter.items() if count > limit}
 
 
 def params_text(
     parser: ParamsParser, raw: Sequence[str], *, include_address: bool = True
 ) -> list[str]:
-    """Оставить от параметров только осмысленные значения
-
-    Адрес держу по умолчанию: в запросах регулярно встречаются названия городов
-    («перевозки владикавказ тбилиси»), и они действительно попадают в адрес исполнителя
-    """
-    prepared: list[str] = []
-    for text in raw:
-        parsed = parser.parse(text)
-        parts = [
-            value
-            for key, values in parsed.values.items()
-            if include_address or key != ADDRESS_KEY
-            for value in values
-            if value and not _numeric(value)
-        ]
-        prepared.append(" ".join(parts))
-    return prepared
+    """То же самое, но склеенное в строку: так его ждёт лексический индекс"""
+    return [" ".join(row) for row in params_values(parser, raw, include_address=include_address)]
 
 
 def item_fields(
@@ -115,22 +147,38 @@ def encoder_texts(
     parser: ParamsParser,
     *,
     description_chars: int = ENCODER_DESCRIPTION_CHARS,
+    max_value_share: float = 0.2,
 ) -> list[str]:
     """Текст объявления для би-энкодера
 
-    Отдельно от item_fields: у энкодера окно 128 токенов, и класть туда всё описание
-    бессмысленно, оно просто обрежется. Беру заголовок, фасетные значения и голову описания -
-    по EDA первые 250 символов описания дают примерно половину его вклада в лексическое
-    покрытие, а дальше идут условия работы и контакты
+    Отдельно от item_fields по двум причинам. Первая: у энкодера окно 128 токенов,
+    и класть туда всё описание бессмысленно, оно просто обрежется. Беру заголовок,
+    значения параметров и голову описания - по EDA первые 250 символов описания дают
+    примерно половину его вклада в лексическое покрытие, а дальше идут условия работы
+    и контакты.
+
+    Вторая: у BM25 частые термы сами получают низкий вес через idf, а у энкодера такого
+    механизма нет, каждый токен занимает место в окне на равных. Поэтому значения,
+    которые стоят у слишком многих объявлений, отсюда выбрасываются
     """
     titles = items["item_title_raw"].fillna("").astype(str).tolist()
-    params = params_text(
+    values = params_values(
         parser,
         items["item_infm_params_text"].fillna("").astype(str).tolist(),
         include_address=False,
     )
+    common = frequent_values(values, max_share=max_value_share)
     descriptions = items["item_description_raw"].fillna("").astype(str).tolist()
+
     return [
-        ". ".join(part for part in (title, param, truncate(body, description_chars)) if part)
-        for title, param, body in zip(titles, params, descriptions, strict=True)
+        ". ".join(
+            part
+            for part in (
+                title,
+                " ".join(value for value in row if value not in common),
+                truncate(body, description_chars),
+            )
+            if part
+        )
+        for title, row, body in zip(titles, values, descriptions, strict=True)
     ]

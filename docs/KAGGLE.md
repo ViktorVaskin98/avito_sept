@@ -43,7 +43,8 @@ kaggle datasets init -p data/raw
 kaggle datasets create -p data/raw --dir-mode zip
 ```
 
-Датасет будет смонтирован в ноутбуке как `/kaggle/input/avito-sept`.
+Датасет смонтируется в `/kaggle/input/<слаг>`. Слаг не обязан совпадать с названием,
+поэтому в ячейке 2 путь не пишется руками, а ищется.
 
 ## Шаг 2. Создать ноутбук
 
@@ -64,44 +65,90 @@ kaggle datasets create -p data/raw --dir-mode zip
 **Ячейка 1. Репозиторий.**
 
 ```python
-!git clone -q https://github.com/ViktorVaskin98/avito_sept.git /kaggle/working/avito
+!GIT_TERMINAL_PROMPT=0 git clone -q https://github.com/ViktorVaskin98/avito_sept.git /kaggle/working/avito
 !pip install -q -e /kaggle/working/avito
 ```
 
 Клонирую, а не ставлю пакет напрямую, чтобы сохранилась структура папок: пути в проекте
-считаются от корня репозитория. Если репозиторий приватный, можно вместо клонирования
-залить его вторым приватным датасетом и скопировать.
+считаются от корня репозитория.
+
+`GIT_TERMINAL_PROMPT=0` тут не для красоты. Если репозиторий приватный, git попросит логин,
+а отвечать ему в ноутбуке некому, и ячейка просто зависнет навсегда без единого сообщения.
+С этой переменной она падает сразу и понятно.
+
+**Если репозиторий приватный**, есть два выхода. Первый: сделать его публичным, всё равно
+по условию задания ссылку надо открыть проверяющему, а данные в репозиторий не входят.
+Второй: залить код вторым приватным датасетом. Локально собрать архив без данных и окружения,
+
+```bash
+tar --exclude=avito_sept/data --exclude=avito_sept/.venv --exclude=avito_sept/.git --exclude=avito_sept/task --exclude='*__pycache__*' -czf avito_code.tar.gz avito_sept
+```
+
+залить его датасетом `avito-sept-code` и заменить ячейку на
+
+```python
+!tar -xzf /kaggle/input/avito-sept-code/avito_code.tar.gz -C /kaggle/working
+!mv /kaggle/working/avito_sept /kaggle/working/avito
+!pip install -q -e /kaggle/working/avito
+```
 
 **Ячейка 2. Данные.**
 
 ```python
-import os, shutil
+import os, shutil, sys
 from pathlib import Path
 
 WORK = Path("/kaggle/working/avito")
-RAW = WORK / "data" / "raw"
-RAW.mkdir(parents=True, exist_ok=True)
+(WORK / "data").mkdir(parents=True, exist_ok=True)
 
-for name in ("train.parquet", "benchmark_items.parquet", "benchmark_queries.parquet"):
-    shutil.copy(Path("/kaggle/input/avito-sept") / name, RAW / name)
+# редактируемая установка кладёт .pth в site-packages, а он читается только при старте
+# интерпретатора, поэтому работающее ядро пакета не видит
+sys.path.insert(0, str(WORK / "src"))
+
+# путь монтирования зависит от слага датасета, а не от его названия: ищу файлы
+found = {p.name: p for p in Path("/kaggle/input").rglob("*.parquet")}
+print("нашёл:", {k: str(v) for k, v in found.items()})
+
+RAW = WORK / "data" / "raw"
+dataset = found["train.parquet"].parent
+if not RAW.exists():
+    RAW.symlink_to(dataset, target_is_directory=True)
 
 os.environ["AVITO_CG_ROOT"] = str(WORK)
 os.chdir(WORK)
 print(sorted(p.name for p in RAW.iterdir()))
 ```
 
-Переменная `AVITO_CG_ROOT` нужна на случай, если пакет всё же встанет не в editable-режиме:
+Три вещи в этой ячейке неочевидны, и на каждой я уже наступил.
+
+`sys.path.insert` нужен потому, что `pip install -e` кладёт в `site-packages` файл `.pth`,
+а он читается только при старте интерпретатора. Команды `!avito-cg ...` работают и без этого,
+они идут отдельным процессом, а вот `import avito_cg` в самом ноутбуке упадёт.
+
+Путь к датасету ищется, а не пишется руками: Kaggle монтирует его по слагу, а слаг
+не обязан совпадать с названием, которое видно в панели.
+
+Симлинк вместо копирования: 686 МБ незачем таскать внутрь рабочей папки, `/kaggle/input`
+доступен на чтение, а писать нам туда и не надо.
+
+Переменная `AVITO_CG_ROOT` нужна на случай, если пакет встанет не в editable-режиме:
 тогда без неё он будет искать данные внутри `site-packages`.
 
 **Ячейка 3. Проверка видеокарты.**
 
 ```python
-import torch
-print("cuda:", torch.cuda.is_available())
-print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "видеокарты нет")
+import numpy, torch
+print("numpy", numpy.__version__, "| torch", torch.__version__, "| cuda", torch.cuda.is_available())
+from avito_cg.config import PATHS
+print("корень:", PATHS.root)
 ```
 
-Если тут `False`, дальше идти бессмысленно: вернись в настройки и включи Accelerator.
+```python
+!avito-cg check-data
+```
+
+Если `cuda` это `False`, дальше идти бессмысленно: вернись в настройки и включи Accelerator.
+Если `check-data` напечатал три файла с размерами, данные на месте.
 
 **Ячейка 4. Локальный бенчмарк.**
 
@@ -198,6 +245,22 @@ uv run avito-cg fuse
 как того требует условие.
 
 ## Если что-то пошло не так
+
+**Первая ячейка висит, и в выводе `Username for https://github.com`.** Репозиторий приватный,
+git ждёт логин, а ввести его в ноутбуке некуда. Останови ячейку и смотри выше, в разделе
+про ячейку 1: либо открыть репозиторий, либо залить код датасетом.
+
+**`ModuleNotFoundError: No module named 'avito_cg'` сразу после установки.** Редактируемая
+установка кладёт `.pth` в `site-packages`, а он читается только при старте интерпретатора.
+Либо `sys.path.insert(0, "/kaggle/working/avito/src")`, как в ячейке 2, либо перезапуск ядра.
+
+**`FileNotFoundError` на файле из `/kaggle/input`.** Датасет монтируется по слагу, а слаг
+не обязан совпадать с названием в панели. Ячейка 2 ищет файлы через `rglob`, а не строит путь.
+
+**pip ругается на конфликты версий после установки.** Это жалобы чужих пакетов образа
+на то, что мы подняли им зависимости. Нас это не ломает, пока `import torch` работает
+и `cuda` возвращает `True`. Если всё-таки сломало, поставь пакет без перетягивания
+зависимостей: `pip install -q -e /kaggle/working/avito --no-deps` плюс `pip install -q pystemmer`.
 
 **Тумблер Internet не включается.** Не подтверждён телефон: Settings → Phone Verification.
 
