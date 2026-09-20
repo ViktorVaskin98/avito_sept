@@ -105,6 +105,7 @@ def _cmd_answer(args: argparse.Namespace) -> int:
         output=args.out,
         with_filter=args.with_filter,
         fusion=None if args.no_geo else FusionConfig(mode=args.fusion, geo_weight=args.geo_weight),
+        rerank=not args.no_rerank,
     )
     return 0
 
@@ -114,6 +115,22 @@ def _cmd_fuse(_: argparse.Namespace) -> int:
     from avito_cg.cli.fuse import run
 
     run()
+    return 0
+
+
+def _cmd_rerank(args: argparse.Namespace) -> int:
+    """Замерить переранжирование на локальном бенчмарке"""
+    from avito_cg.cli.rerank import run
+
+    run(donor=not args.no_donor, save=args.save)
+    return 0
+
+
+def _cmd_donor_set(args: argparse.Namespace) -> int:
+    """Набрать донорские запросы для обучения переранжировщика"""
+    from avito_cg.cli.rerank import build_donor
+
+    build_donor(n_queries=args.n_queries, device=args.device)
     return 0
 
 
@@ -179,6 +196,18 @@ def build_parser() -> argparse.ArgumentParser:
     fuse = subparsers.add_parser("fuse", help="слияние лексики с гео на локальном бенчмарке")
     fuse.set_defaults(func=_cmd_fuse)
 
+    donor = subparsers.add_parser("donor-set", help="набрать донорские запросы и закодировать их")
+    donor.add_argument("--n-queries", type=int, default=40000, help="бюджет по числу запросов")
+    donor.add_argument("--device", default="auto", help="auto, cuda или cpu")
+    donor.set_defaults(func=_cmd_donor_set)
+
+    rerank = subparsers.add_parser("rerank", help="переранжирование на локальном бенчмарке")
+    rerank.add_argument("--no-donor", action="store_true", help="только отложенные запросы")
+    rerank.add_argument(
+        "--save", default=None, help="имя конфигурации из сводки, которую сохранить для ответа"
+    )
+    rerank.set_defaults(func=_cmd_rerank)
+
     encoder = subparsers.add_parser("train-encoder", help="дообучить би-энкодер, нужен GPU")
     encoder.add_argument("--model", default="intfloat/multilingual-e5-base")
     encoder.add_argument("--batch-size", type=int, default=96)
@@ -213,6 +242,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="как согласовывать масштабы лексики и гео",
     )
     answer.add_argument("--geo-weight", type=float, default=0.10, help="вес гео в скоре")
+    answer.add_argument("--no-rerank", action="store_true", help="не применять переранжировщик")
     answer.add_argument("--out", type=_resolve, default=None)
     answer.set_defaults(func=_cmd_answer)
 

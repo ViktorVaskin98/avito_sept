@@ -328,3 +328,105 @@ class BM25FIndex:
             ),
             shape=(len(queries), len(self.vocabulary)),
         )
+
+    def query_terms(self, text: str) -> np.ndarray:
+        """Идентификаторы термов запроса, попавших в словарь"""
+        columns = {
+            self.vocabulary[token] for token in self.tokenizer(text) if token in self.vocabulary
+        }
+        return np.array(sorted(columns), dtype=np.int64)
+
+    def presence(self, field_name: str) -> FieldPresence:
+        """Быстрая проверка «стоит ли терм в этом поле этого объявления»"""
+        field = next(item for item in self.fields if item.name == field_name)
+        lengths = self._field_lengths[field_name]
+        average = lengths[lengths > 0].mean() if (lengths > 0).any() else 1.0
+        norm = 1 - field.b + field.b * lengths / average
+        norm[lengths == 0] = 1.0
+        return FieldPresence(
+            self._field_counts[field_name].tocsc(),
+            lengths=lengths,
+            norm=norm,
+            boost=field.boost,
+            k1=self.k1,
+        )
+
+
+class FieldPresence:
+    """Обратный список одного поля: терм -> отсортированные номера объявлений
+
+    Нужен для признаков переранжировщика. Токенизировать заголовки и описания заново
+    в питоне это миллионы вызовов, а индекс их уже переварил: достаточно взять столбец
+    матрицы частот и пересечь его с кандидатами
+    """
+
+    __slots__ = ("_boost", "_data", "_indices", "_indptr", "_k1", "length", "norm")
+
+    def __init__(
+        self,
+        counts: sp.csc_matrix,
+        *,
+        lengths: np.ndarray,
+        norm: np.ndarray,
+        boost: float,
+        k1: float,
+    ) -> None:
+        counts.sort_indices()
+        self._indices = counts.indices
+        self._indptr = counts.indptr
+        self._data = counts.data
+        self._boost = boost
+        self._k1 = k1
+        self.length = lengths
+        self.norm = norm
+
+    def counts(self, term: int, items: np.ndarray) -> np.ndarray:
+        """Частота терма в поле каждого объявления, ноль там, где терма нет"""
+        begin, end = self._indptr[term], self._indptr[term + 1]
+        column = self._indices[begin:end]
+        if column.size == 0:
+            return np.zeros(items.size)
+        position = np.searchsorted(column, items).clip(0, column.size - 1)
+        hit = column[position] == items
+        return np.where(hit, self._data[begin:end][position], 0.0)
+
+    def score(self, terms: np.ndarray, idf: np.ndarray, items: np.ndarray) -> np.ndarray:
+        """BM25 по одному этому полю
+
+        Индекс считает насыщение один раз по сумме всех полей, и это правильно для отбора.
+        Но переранжировщику полезно знать, где именно совпало: «нашлось в заголовке»
+        и «нашлось только в описании» это разные ситуации, а в общем скоре они слиты
+        """
+        total = np.zeros(items.size)
+        if terms.size == 0 or items.size == 0:
+            return total
+        weights = self._boost * (1.0 / self.norm[items])
+        for position, term in enumerate(terms):
+            value = weights * self.counts(int(term), items)
+            total += idf[position] * value / (self._k1 + value)
+        return total
+
+    def contains(self, term: int, items: np.ndarray) -> np.ndarray:
+        # столбец отсортирован, поэтому не isin, а двоичный поиск: столбец частого
+        # терма это сотня тысяч номеров, и линейный проход по нему на каждый запрос
+        # обходится дороже всего остального вместе взятого
+        begin, end = self._indptr[term], self._indptr[term + 1]
+        column = self._indices[begin:end]
+        if column.size == 0:
+            return np.zeros(items.size, dtype=bool)
+        position = np.searchsorted(column, items).clip(0, column.size - 1)
+        return column[position] == items
+
+    def coverage(
+        self, terms: np.ndarray, items: np.ndarray, weights: np.ndarray | None
+    ) -> np.ndarray:
+        """Доля термов запроса, встреченных в поле, при желании взвешенная по idf"""
+        if terms.size == 0 or items.size == 0:
+            return np.zeros(items.size)
+        hits = np.zeros(items.size)
+        total = 0.0
+        for position, term in enumerate(terms):
+            weight = 1.0 if weights is None else float(weights[position])
+            hits += weight * self.contains(int(term), items)
+            total += weight
+        return hits / total if total else hits

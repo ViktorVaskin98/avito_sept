@@ -5,11 +5,16 @@
 что я мерил локально, а не «примерно тем же».
 
 Гео здесь учится на всех обучающих парах, а не на fit_pairs: отложенных запросов на этой
-стороне нет, прятать не от кого.
+стороне нет, прятать не от кого. По той же причине популярность объявления и память кликлога
+для переранжировщика считаются по всему train.
+
+Переранжировщик подключается, если он обучен и лежит в артефактах. Обучается он на локальном
+бенчмарке командой rerank, сюда приезжает готовым: разметки бенчмарка мы не касаемся вообще.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,6 +27,7 @@ from avito_cg.eval.submission import save_submission
 from avito_cg.index.fields import PARAM_KEYS_FILE, item_fields, load_parser, query_texts
 from avito_cg.index.geo import GeoIndex
 from avito_cg.index.lexical import DEFAULT_FIELDS, BM25FIndex, Field
+from avito_cg.retrieval.candidates import collect
 from avito_cg.retrieval.fusion import DEFAULT_CONFIG, FusionConfig, retrieve
 from avito_cg.retrieval.signals import (
     DenseSignal,
@@ -30,6 +36,88 @@ from avito_cg.retrieval.signals import (
     MicrocatSignal,
     load_embeddings,
 )
+from avito_cg.train.reranker import CandidateSet, ItemContext, build_features, predict
+
+RERANKER = "reranker.cbm"
+# та же глубина, на которой реранкер обучался и мерился
+RERANK_DEPTH = 200
+
+
+def _reranked(
+    index,
+    signals,
+    texts,
+    items,
+    queries,
+    pairs,
+    model_path,
+    *,
+    coordinates,
+    extra,
+    config,
+    top_k,
+):
+    """Выдача после переранжирования обученной на локальном бенчмарке моделью
+
+    Кандидаты собираю тем же collect, что и при замере: признаки должны считаться
+    ровно по той же формуле, иначе модель получит другие единицы и выдача разъедется
+    с тем, что я мерил
+    """
+    from catboost import CatBoostClassifier, CatBoostRanker
+
+    query_ids = queries["query_id"].astype(str).tolist()
+    # сбор кандидатов по настоящему корпусу это семь минут, а смена модели секунды.
+    # Кэш привязан к набору признаков: поменял FEATURES - удали файл
+    cache = PATHS.artifacts / "rerank_benchmark.npz"
+    if cache.exists():
+        stored = np.load(cache)
+        data = CandidateSet(
+            query=stored["query"],
+            item=stored["item"],
+            features=stored["features"],
+            label=stored["label"],
+        )
+        print(f"таблица признаков из кэша {cache.name}, строк {len(data.label)}", flush=True)
+    else:
+        collected = collect(
+            index, signals, texts, depth=RERANK_DEPTH, config=config, extra_candidates=extra
+        )
+        context = ItemContext.build(items, index, pairs)
+        latitude, longitude = coordinates
+        data = build_features(
+            collected.items,
+            collected.lexical,
+            collected.scores,
+            queries,
+            context,
+            index,
+            query_latitude=latitude,
+            query_longitude=longitude,
+            query_ids=query_ids,
+        )
+        np.savez_compressed(
+            cache,
+            features=data.features,
+            label=data.label,
+            query=data.query,
+            item=data.item,
+        )
+
+    kind = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
+    model = CatBoostRanker() if kind["objective"] != "logloss" else CatBoostClassifier()
+    model.load_model(str(model_path))
+    print(f"переранжирование моделью «{kind['имя']}», {kind['objective']}", flush=True)
+    scores = predict(model, data.features)
+
+    order = np.full((len(query_ids), top_k), -1, dtype=np.int64)
+    ranked = np.lexsort((-scores, data.query))
+    filled = np.zeros(len(query_ids), dtype=np.int64)
+    for position in ranked:
+        query = data.query[position]
+        if filled[query] < top_k:
+            order[query, filled[query]] = data.item[position]
+            filled[query] += 1
+    return order
 
 
 def run(
@@ -40,6 +128,7 @@ def run(
     fusion: FusionConfig | None = DEFAULT_CONFIG,
     weights: dict[str, float] | None = None,
     top_k: int = TOP_K,
+    rerank: bool = True,
 ) -> Path:
     PATHS.ensure()
     destination = output or PATHS.submissions / "answer.csv"
@@ -76,6 +165,7 @@ def run(
     else:
         train = load_train(
             columns=[
+                "item_id",
                 "search_location_id",
                 "search_query",
                 "search_infm_params_text",
@@ -91,6 +181,10 @@ def run(
             (FacetSignal.build(queries, items, train), weights["фасеты"]),
             (MicrocatSignal.build(queries, items, train), weights["микрокатегория"]),
         ]
+        # для переранжировщика от train нужны только эти две колонки: популярность
+        # объявления и память «что выбирали под этот же текст». Остальное отпускаю,
+        # полный кадр это полтора гигабайта
+        pairs = train[["item_id", "search_query"]].copy()
         del train
 
         # плотный поиск подключается, только если эмбеддинги посчитаны, см. docs/KAGGLE.md
@@ -120,16 +214,37 @@ def run(
         elif weights.get("плотный"):
             print(f"эмбеддингов нет в {embeddings}, плотный сигнал пропускаю", flush=True)
         latitude, longitude = geo.query_coordinates(queries["search_location_id"].to_numpy())
-        order = retrieve(
-            index,
-            signals,
-            texts,
-            top_k=top_k,
-            config=fusion,
-            padding=geo,
-            query_coordinates=(latitude, longitude),
-            extra_candidates=extra,
-        )
+        model_path = PATHS.artifacts / RERANKER
+        # переранжировщик обучен на полном наборе сигналов, включая плотный. Без него
+        # часть признаков посчитать нечем, и применять модель бессмысленно
+        available = {signal.name for signal, _ in signals}
+        if rerank and model_path.exists() and "плотный" in available:
+            order = _reranked(
+                index,
+                signals,
+                texts,
+                items,
+                queries,
+                pairs,
+                model_path,
+                coordinates=(latitude, longitude),
+                extra=extra,
+                config=fusion,
+                top_k=top_k,
+            )
+        else:
+            if rerank:
+                print(f"без переранжирования, порядок слияния ({model_path})", flush=True)
+            order = retrieve(
+                index,
+                signals,
+                texts,
+                top_k=top_k,
+                config=fusion,
+                padding=geo,
+                query_coordinates=(latitude, longitude),
+                extra_candidates=extra,
+            )
         print(
             f"поиск за {time.time() - started:.0f} c, лексика + "
             + ", ".join(f"{signal.name}={weight}" for signal, weight in signals),
