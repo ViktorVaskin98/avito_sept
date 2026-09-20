@@ -16,7 +16,12 @@ from dataclasses import dataclass
 import numpy as np
 
 from avito_cg.index.lexical import BM25FIndex
-from avito_cg.retrieval.fusion import DEFAULT_CONFIG, FusionConfig, _lexical_component
+from avito_cg.retrieval.fusion import (
+    DEFAULT_CONFIG,
+    FusionConfig,
+    lexical_component,
+    signal_component,
+)
 from avito_cg.retrieval.signals import Signal
 
 FINAL = "итог"
@@ -76,11 +81,14 @@ def collect(
             if candidates.size == 0:
                 continue
 
-            total = _lexical_component(values, config)
+            total = lexical_component(values, config)
             per_signal = {}
             for signal, weight in signals:
+                # сохраняю сырой скор сигнала: он идёт признаком в переранжировщик.
+                # В сумму он складывается ровно тем же преобразованием, что и в retrieve,
+                # иначе пул кандидатов и выдача считались бы по разным формулам
                 per_signal[signal.name] = signal.score(query, candidates)
-                total = total + weight * per_signal[signal.name]
+                total = total + signal_component(per_signal[signal.name], weight, config)
 
             keep = np.argsort(-total)[:depth]
             items[query] = candidates[keep]

@@ -107,3 +107,20 @@ def test_save_allows_empty_answers_but_not_broken_ids(tmp_path):
         corpus_item_ids=ITEMS,
     )
     assert path.exists()
+
+
+def test_written_file_uses_lf_on_any_platform(tmp_path):
+    """Иначе один и тот же ответ на Windows и на Linux отличается побайтово
+
+    Платформе это безразлично, а вот проверить воспроизводимость сверкой файлов
+    или их хэшей уже нельзя, и в README такую сверку я обещаю
+    """
+    path = tmp_path / "answer.csv"
+    save_submission(
+        {"a" * 16: ["0" * 16], "b" * 16: ["1" * 16]},
+        path,
+        expected_query_ids=["a" * 16, "b" * 16],
+    )
+    raw = path.read_bytes()
+    assert b"\r\n" not in raw
+    assert raw.count(b"\n") == 3

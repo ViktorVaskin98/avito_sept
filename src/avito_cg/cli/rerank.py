@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from catboost import CatBoostClassifier, CatBoostRanker
 
-from avito_cg.config import PATHS, TOP_K
+from avito_cg.config import DENSE_DEPTH, PATHS, TOP_K
 from avito_cg.data.io import load_train
 from avito_cg.eval.benchmark import LocalBenchmark
 from avito_cg.eval.metrics import paired_bootstrap, recall_at_k, recall_per_query
@@ -34,6 +36,7 @@ from avito_cg.retrieval.signals import (
     FacetSignal,
     GeoSignal,
     MicrocatSignal,
+    Signal,
     load_embeddings,
 )
 from avito_cg.train.reranker import (
@@ -42,9 +45,11 @@ from avito_cg.train.reranker import (
     ItemContext,
     build_features,
     cross_validated_scores,
+    features_fingerprint,
     fit,
     importance,
     predict,
+    ranked_items,
 )
 
 COLUMNS = [
@@ -64,7 +69,6 @@ COLUMNS = [
 TRAIN_COLUMNS = ["search_location_id", "search_query", "search_infm_params_text", *COLUMNS]
 WEIGHTS = {"гео": 0.10, "фасеты": 0.10, "микрокатегория": 0.02, "плотный": 0.5}
 DEPTH = 200
-DENSE_DEPTH = 200
 
 # признаки уровня объявления. Выношу отдельно, чтобы измерить их вклад отдельным замером:
 # на донорских запросах популярность смещена по построению, и это надо видеть
@@ -132,17 +136,35 @@ def _signals(
     geo: GeoIndex,
     item_vectors: np.ndarray,
     query_vectors: np.ndarray,
-) -> tuple[list, DenseSignal]:
+) -> tuple[list[tuple[Signal, float]], DenseSignal]:
+    """Все четыре сигнала с весами плюс отдельная ссылка на плотный
+
+    Плотный возвращается вторым значением, потому что он нужен не только как сигнал:
+    он ещё и порождает кандидатов, до которых лексика не дотягивается
+    """
     dense = DenseSignal(query_vectors=query_vectors, item_vectors=item_vectors)
-    return [
+    signals: list[tuple[Signal, float]] = [
         (GeoSignal.build(geo, queries), WEIGHTS["гео"]),
         (FacetSignal.build(queries, corpus, pairs), WEIGHTS["фасеты"]),
         (MicrocatSignal.build(queries, corpus, pairs), WEIGHTS["микрокатегория"]),
         (dense, WEIGHTS["плотный"]),
-    ], dense
+    ]
+    return signals, dense
 
 
-def _prepare(
+def fingerprint(index: BM25FIndex, *, depth: int = DEPTH) -> str:
+    """Отпечаток конфигурации, под которую собрана таблица признаков"""
+    return features_fingerprint(
+        [(field.name, field.boost, field.b) for field in index.fields],
+        WEIGHTS,
+        k1=index.k1,
+        mode="normalized",
+        depth=depth,
+        dense_depth=DENSE_DEPTH,
+    )
+
+
+def prepare(
     queries: pd.DataFrame,
     relevant: dict[str, set[str]] | None,
     corpus: pd.DataFrame,
@@ -159,21 +181,30 @@ def _prepare(
     """Выдача до переранжирования и таблица признаков по тем же кандидатам
 
     Сбор кандидатов это самая дорогая часть прогона, семь минут на две с половиной тысячи
-    запросов, поэтому результат кладётся рядом. Кэш привязан к набору признаков:
-    поменял FEATURES - удали файл
+    запросов, поэтому результат кладётся рядом. В файл пишется отпечаток конфигурации,
+    и при расхождении таблица пересобирается: тихо взять признаки, собранные под другие
+    веса, хуже, чем потратить семь минут
     """
     query_ids = queries["query_id"].astype(str).tolist()
+    stamp = fingerprint(index, depth=depth)
     if cache is not None and cache.exists():
         stored = np.load(cache)
-        rows = len(stored["label"])
-        print(f"  таблица признаков из кэша {cache.name}, строк {rows}", flush=True)
-        data = CandidateSet(
-            query=stored["query"],
-            item=stored["item"],
-            features=stored["features"],
-            label=stored["label"],
+        saved = str(stored["fingerprint"]) if "fingerprint" in stored else ""
+        if saved == stamp:
+            rows = len(stored["label"])
+            print(f"  таблица признаков из кэша {cache.name}, строк {rows}", flush=True)
+            data = CandidateSet(
+                query=stored["query"],
+                item=stored["item"],
+                features=stored["features"],
+                label=stored["label"],
+            )
+            return ranked_items(data, None, len(query_ids), top_k=TOP_K), data, query_ids
+        print(
+            f"  кэш {cache.name} собран под другую конфигурацию "
+            f"({saved or 'отпечатка нет'} против {stamp}), пересобираю",
+            flush=True,
         )
-        return stored["order"], data, query_ids
 
     signals, dense = _signals(queries, corpus, pairs, geo, item_vectors, query_vectors)
     started = time.time()
@@ -203,7 +234,6 @@ def _prepare(
     )
     print(f"  признаки за {time.time() - started:.0f} c, строк {len(data.label)}", flush=True)
 
-    order = collected.order(TOP_K)
     if cache is not None:
         np.savez_compressed(
             cache,
@@ -211,9 +241,9 @@ def _prepare(
             label=data.label,
             query=data.query,
             item=data.item,
-            order=order,
+            fingerprint=stamp,
         )
-    return order, data, query_ids
+    return ranked_items(data, None, len(query_ids), top_k=TOP_K), data, query_ids
 
 
 def _reorder(
@@ -225,13 +255,11 @@ def _reorder(
     top_k: int = TOP_K,
 ) -> dict[str, list[str]]:
     """Выдача после переранжирования: топ-k по скору внутри каждого запроса"""
-    order = np.lexsort((-scores, data.query))
-    predictions: dict[str, list[str]] = {query: [] for query in query_ids}
-    for position in order:
-        query = query_ids[data.query[position]]
-        if len(predictions[query]) < top_k:
-            predictions[query].append(str(item_ids[data.item[position]]))
-    return predictions
+    order = ranked_items(data, scores, len(query_ids), top_k=top_k)
+    return {
+        query: [str(item_ids[position]) for position in row if position >= 0]
+        for query, row in zip(query_ids, order, strict=True)
+    }
 
 
 def run(*, donor: bool = True, top_k: int = TOP_K, save: str | None = None) -> None:
@@ -255,7 +283,7 @@ def run(*, donor: bool = True, top_k: int = TOP_K, save: str | None = None) -> N
     print(f"подготовка за {time.time() - started:.0f} c", flush=True)
 
     print("\nотложенные запросы")
-    base_order, data, query_ids = _prepare(
+    base_order, data, query_ids = prepare(
         local.queries,
         local.relevant,
         corpus,
@@ -281,7 +309,7 @@ def run(*, donor: bool = True, top_k: int = TOP_K, save: str | None = None) -> N
     results: list[tuple[str, np.ndarray]] = []
     # обучение финальной модели откладываю до конца: если сохранять не просили,
     # лишние несколько минут ни к чему
-    models: dict[str, object] = {}
+    models: dict[str, Callable[[], CatBoostClassifier | CatBoostRanker]] = {}
 
     print("\nобучение на отложенных, кросс-валидация по запросам", flush=True)
     for name, features in (("все признаки", FEATURES), ("без приоров", _without_priors())):
@@ -306,7 +334,7 @@ def run(*, donor: bool = True, top_k: int = TOP_K, save: str | None = None) -> N
                 index=False
             ):
                 donor_relevant.setdefault(str(query), set()).add(str(item))
-            _, donor_data, _ = _prepare(
+            _, donor_data, _ = prepare(
                 donor_queries,
                 donor_relevant,
                 corpus,
@@ -366,10 +394,6 @@ def _report(label: str, base: np.ndarray, per_query: np.ndarray) -> None:
         f"{label}: {per_query.mean():.4f}, "
         f"прирост {delta:+.4f} [{low:+.4f}, {high:+.4f}], {verdict}"
     )
-
-
-def save_model(model: object, path: Path) -> None:
-    model.save_model(str(path))  # type: ignore[attr-defined]
 
 
 if __name__ == "__main__":

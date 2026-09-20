@@ -21,17 +21,18 @@ import numpy as np
 from avito_cg.config import PATHS
 from avito_cg.data.io import load_benchmark_items, load_train
 from avito_cg.eval.benchmark import LocalBenchmark
-from avito_cg.index.fields import PARAM_KEYS_FILE, encoder_texts, load_parser
+from avito_cg.index.fields import (
+    encoder_texts,
+    frequent_values,
+    load_parser,
+    params_values,
+)
 from avito_cg.train.biencoder import TrainingConfig, encode, train
 
 ENCODER_DIR = "encoder"
 ITEM_COLUMNS = ["item_id", "item_title_raw", "item_infm_params_text", "item_description_raw"]
 TRAIN_COLUMNS = ["search_query", *ITEM_COLUMNS]
 SPLIT_DIR = "local_benchmark"
-
-
-def _parser(texts: list[str]):
-    return load_parser(texts, PATHS.interim / PARAM_KEYS_FILE)
 
 
 def run_training(config: TrainingConfig, *, output: Path | None = None) -> Path:
@@ -46,9 +47,21 @@ def run_training(config: TrainingConfig, *, output: Path | None = None) -> Path:
     if config.max_pairs:
         pairs = pairs.sample(min(config.max_pairs, len(pairs)), random_state=config.seed)
 
-    parser = _parser(pairs["item_infm_params_text"].astype(str).tolist())
+    # частые значения параметров считаю по уникальным объявлениям, а не по парам:
+    # в парах популярное объявление лежит десятки раз, и его значения выглядели бы
+    # частыми там, где по корпусу они редкие. Иначе текст одного и того же объявления
+    # при обучении и при кодировании корпуса получается разным
+    parser = load_parser()
+    unique_items = pairs.drop_duplicates(subset="item_id")
+    common = frequent_values(
+        params_values(
+            parser,
+            unique_items["item_infm_params_text"].fillna("").astype(str).tolist(),
+            include_address=False,
+        )
+    )
     queries = pairs["search_query"].fillna("").astype(str).tolist()
-    passages = encoder_texts(pairs, parser)
+    passages = encoder_texts(pairs, parser, common=common)
     del train_frame, pairs
     print(f"пары готовы за {time.time() - started:.0f} c: {len(queries)}", flush=True)
 
@@ -79,7 +92,7 @@ def run_encoding(
     else:
         raise ValueError(f"неизвестный корпус: {scope}")
 
-    parser = _parser(items["item_infm_params_text"].astype(str).tolist())
+    parser = load_parser()
     texts = encoder_texts(items, parser)
     print(f"тексты готовы за {time.time() - started:.0f} c: {len(texts)}", flush=True)
 

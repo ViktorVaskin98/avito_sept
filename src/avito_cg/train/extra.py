@@ -29,18 +29,6 @@ from avito_cg.data.io import QUERY_FEATURE_COLUMNS, query_key
 from avito_cg.eval.benchmark import LocalBenchmark, synthetic_query_id
 
 
-def item_popularity(pairs: pd.DataFrame, item_ids: np.ndarray) -> np.ndarray:
-    """Сколько раз каждое объявление корпуса выбирали в разрешённых парах
-
-    Девять объявлений из десяти в настоящем корпусе не встречаются в обучающих парах вовсе,
-    и локальный сплит эту долю воспроизводит. То есть признак разреженный по построению,
-    а не по случайности
-    """
-    counts = pairs["item_id"].astype(str).value_counts()
-    lookup = counts.to_dict()
-    return np.array([lookup.get(item, 0) for item in item_ids], dtype=np.float64)
-
-
 def build_donor_set(
     train: pd.DataFrame,
     local: LocalBenchmark,
@@ -74,7 +62,8 @@ def build_donor_set(
         positives[query_ids[row]].add(items[row])
 
     target = _seen_share(local.relevant, fit_items)
-    with_seen, without_seen = [], []
+    with_seen: list[str] = []
+    without_seen: list[str] = []
     for query, chosen in positives.items():
         bucket = with_seen if chosen & fit_items else without_seen
         bucket.append(query)
@@ -86,9 +75,9 @@ def build_donor_set(
     )
 
     selected = {query: positives[query] for query in chosen_queries}
-    first_row = {}
+    first_row: dict[str, int] = {}
     for row in rows:
-        first_row.setdefault(query_ids[row], row)
+        first_row.setdefault(query_ids[row], int(row))
     order = [first_row[query] for query in chosen_queries]
 
     queries = train.iloc[order][list(QUERY_FEATURE_COLUMNS)].copy()

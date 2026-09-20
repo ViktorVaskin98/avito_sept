@@ -1,11 +1,18 @@
+# данные и тяжёлые артефакты: сырые parquet, индексы, эмбеддинги, веса
 /data/
-/submissions/
+
+# отправленные ответы: в репозитории лежит только финальный, остальные промежуточные
+/submissions/*
+!/submissions/answer.csv
+
+# скриншоты условия с платформы, выкладывать их нельзя
+/task/
 
 .venv/
+.uv/
 __pycache__/
 *.py[cod]
 *.egg-info/
-.uv/
 
 .pytest_cache/
 .mypy_cache/
@@ -13,11 +20,8 @@ __pycache__/
 .ipynb_checkpoints/
 notebooks/*-checkpoint.ipynb
 
-/task/
-.claude/
-CLAUDE.md
-*.local.*
 scratch/
+*.local.*
 
 .DS_Store
 Thumbs.db

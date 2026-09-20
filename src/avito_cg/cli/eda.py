@@ -38,6 +38,11 @@ def _print(title: str, payload: Any) -> None:
 
 
 def run() -> dict[str, Any]:
+    """Посчитать весь разбор данных разом: таблицы в reports/eda.json, графики в figures
+
+    Числа из этой команды - единственный источник для docs/EDA.md. Ноутбука,
+    который надо прокликать, чтобы получить число из документации, тут нет намеренно
+    """
     PATHS.ensure()
     started = time.time()
     train = load_train()

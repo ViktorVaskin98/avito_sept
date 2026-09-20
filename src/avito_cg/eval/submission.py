@@ -136,7 +136,10 @@ def save_submission(
     if blocking:
         raise SubmissionError("; ".join(blocking))
     path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(path, index=False, encoding="utf-8")
+    # перевод строки фиксирую явно: по умолчанию pandas берёт его у операционной системы,
+    # и один и тот же ответ на Windows и на Linux получается побайтово разным. Платформе
+    # это безразлично, а вот проверить воспроизводимость сверкой файлов уже нельзя
+    frame.to_csv(path, index=False, encoding="utf-8", lineterminator="\n")
     return frame
 
 

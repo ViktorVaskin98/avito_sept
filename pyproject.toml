@@ -36,6 +36,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
+# кладётся весь каталог пакета, включая src/avito_cg/data/param_keys.json:
+# словарь ключей параметров это такой же артефакт решения, как веса полей,
+# и без него пакет не соберёт индекс. Проверяется в tests/test_params_pinned.py
 packages = ["src/avito_cg"]
 
 [tool.ruff]
@@ -48,6 +51,11 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 # кириллица в строках и комментариях это не гомоглифы, а рабочий язык проекта,
 # а стоп-лист удобнее держать текстом, а не списком из полутора сотен строк
 ignore = ["RUF001", "RUF002", "RUF003", "SIM905"]
+
+[tool.ruff.lint.per-file-ignores]
+# скрипт для Kaggle написан ячейками и копируется в ноутбук по разделителям:
+# импорты там стоят в тех ячейках, где используются, и это не ошибка, а формат
+"notebooks/*.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.12"

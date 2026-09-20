@@ -48,14 +48,13 @@ class FusionConfig:
     """
 
     mode: Mode = "normalized"
-    geo_weight: float = 0.10
     rrf_k: int = RRF_K
 
 
 DEFAULT_CONFIG = FusionConfig()
 
 
-def _lexical_component(lexical: np.ndarray, config: FusionConfig) -> np.ndarray:
+def lexical_component(lexical: np.ndarray, config: FusionConfig) -> np.ndarray:
     if config.mode == "raw":
         return lexical
     if config.mode == "normalized":
@@ -66,7 +65,7 @@ def _lexical_component(lexical: np.ndarray, config: FusionConfig) -> np.ndarray:
     return 1 / (config.rrf_k + ranks)
 
 
-def _signal_component(values: np.ndarray, weight: float, config: FusionConfig) -> np.ndarray:
+def signal_component(values: np.ndarray, weight: float, config: FusionConfig) -> np.ndarray:
     if config.mode != "rrf":
         return weight * values
     ranks = np.empty(values.size, dtype=np.float64)
@@ -115,21 +114,21 @@ def retrieve(
             if candidates.size == 0:
                 continue
 
-            combined = _lexical_component(lexical, config)
+            combined = lexical_component(lexical, config)
             for signal, weight in signals:
                 if weight:
-                    combined = combined + _signal_component(
+                    combined = combined + signal_component(
                         signal.score(query, candidates), weight, config
                     )
             chosen, _ = top_k_from_row(candidates, combined, top_k)
             result[query, : chosen.size] = chosen
 
     if padding is not None and query_coordinates is not None:
-        _pad_with_nearest(result, padding, *query_coordinates, top_k)
+        pad_with_nearest(result, padding, *query_coordinates, top_k)
     return result
 
 
-def _pad_with_nearest(
+def pad_with_nearest(
     result: np.ndarray,
     geo: GeoIndex,
     latitude: np.ndarray,

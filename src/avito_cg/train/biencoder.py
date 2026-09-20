@@ -70,7 +70,7 @@ class TrainingConfig:
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-class PairDataset(Dataset):
+class PairDataset(Dataset[tuple[str, str]]):
     """Пары «запрос - выбранное объявление»"""
 
     def __init__(self, queries: Sequence[str], passages: Sequence[str]) -> None:
@@ -104,6 +104,11 @@ def embed(
     max_length: int,
     device: torch.device,
 ) -> torch.Tensor:
+    """Нормированные векторы текстов: усреднение по токенам и L2
+
+    Нормировка тут, а не в вызывающем коде: косинус считается скалярным произведением,
+    и достаточно один раз забыть про неё, чтобы скоры перестали быть сравнимыми
+    """
     batch = tokenizer(
         list(texts), padding=True, truncation=True, max_length=max_length, return_tensors="pt"
     ).to(device)
@@ -133,6 +138,14 @@ def train(
     """Дообучить би-энкодер и сохранить веса"""
     torch.manual_seed(config.seed)
     device = config.resolve_device()
+    if device.type == "cuda":
+        # включаю детерминированные ядра cudnn. Побайтово одинаковых весов это всё равно
+        # не даёт: часть операций backward складывает градиенты атомарно, и порядок
+        # сложения float зависит от планировщика. Но разброс между прогонами сокращается,
+        # и это дешевле, чем притворяться, что обучение на GPU воспроизводимо точно
+        torch.cuda.manual_seed_all(config.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     amp = config.use_amp and device.type == "cuda"
 
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
@@ -198,7 +211,7 @@ def train(
                 )
                 loss = info_nce(query_vectors, passage_vectors, config.temperature)
 
-            scaler.scale(loss).backward()
+            scaler.scale(loss).backward()  # type: ignore[no-untyped-call]
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(optimizer)

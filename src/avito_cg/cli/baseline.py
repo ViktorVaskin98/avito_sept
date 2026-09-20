@@ -21,12 +21,19 @@ from avito_cg.config import PATHS, TOP_K
 from avito_cg.data.io import load_train
 from avito_cg.eval.benchmark import LocalBenchmark
 from avito_cg.eval.metrics import bootstrap_ci, recall_at_k, recall_curve, recall_per_query
-from avito_cg.index.fields import PARAM_KEYS_FILE, item_fields, load_parser, query_texts
-from avito_cg.index.lexical import BM25FIndex, Field
+from avito_cg.index.fields import item_fields, load_parser, query_texts
+from avito_cg.index.lexical import DEFAULT_FIELDS, K1, BM25FIndex, Field
 
 CORPUS_COLUMNS = ["item_id", "item_title_raw", "item_infm_params_text", "item_description_raw"]
 SPLIT_DIR = "local_benchmark"
 CANDIDATE_DEPTH = 1000
+
+TITLE_GRID = (1.0, 2.0, 3.0, 5.0, 8.0, 20.0, 40.0)
+PARAMS_GRID = (0.0, 0.1, 0.25, 0.5)
+DESCRIPTION_GRID = (0.5, 1.0, 2.0)
+# от этого значения и выше метрика по весу заголовка выходит на полку, см. docs/EXPERIMENTS.md
+TITLE_PLATEAU = 8.0
+K1_GRID = (0.6, 0.9, 1.2, 1.6, 2.2)
 
 
 def _predictions(
@@ -52,6 +59,13 @@ def _score(
 
 
 def run(*, grid: bool = True) -> None:
+    """Замерить BM25F на локальном бенчмарке: вклад полей, веса, насыщение, глубина
+
+    Первая таблица - проверка не столько модели, сколько сплита: если добавление
+    описания к заголовку не поднимает метрику, сломан не BM25, а разметка или метрика.
+    Последняя - глубина кандидатов, из неё видно, сколько теряется на упорядочивании,
+    а сколько на поиске, и это определило всю дальнейшую конструкцию
+    """
     PATHS.ensure()
     started = time.time()
 
@@ -61,9 +75,7 @@ def run(*, grid: bool = True) -> None:
     del train
     print(f"корпус {len(corpus)} объявлений загружен за {time.time() - started:.0f} c", flush=True)
 
-    parser = load_parser(
-        corpus["item_infm_params_text"].astype(str).tolist(), PATHS.interim / PARAM_KEYS_FILE
-    )
+    parser = load_parser()
 
     cache = PATHS.artifacts / "lexical_local"
     started = time.time()
@@ -105,52 +117,68 @@ def run(*, grid: bool = True) -> None:
         records[-1]["секунд"] = round(time.time() - started, 1)
     print(pd.DataFrame(records).round(4).to_string(index=False))
 
-    best_fields = [
-        Field("title", 1.0, 0.6),
-        Field("params", 1.0, 0.75),
-        Field("description", 1.0, 0.75),
-    ]
+    best_fields = list(DEFAULT_FIELDS)
     if grid:
+
+        def score(fields: list[Field], k1: float | None = None) -> float:
+            index.reweight(fields, k1=k1)
+            order, _ = index.search(plain, top_k=TOP_K)
+            return recall_at_k(local.relevant, _predictions(order, item_ids, query_ids, TOP_K))
+
         print("\nПодбор весов полей")
         # параметры с весом 1 метрику роняют (0.2773 -> 0.2613 на первом прогоне):
         # это 140 токенов родовых фасетных значений, общих для тысяч объявлений,
-        # поэтому сетка идёт от нуля, а не вокруг единицы
+        # поэтому сетка идёт от нуля, а не вокруг единицы. Верх по заголовку доведён
+        # до 40, чтобы в сетку попало и выбранное решением значение 20, и то, что
+        # за ним: иначе таблица упирается в край и по ней не видно, есть ли там полка
         results = []
         for title_boost, params_boost, description_boost in product(
-            (1.0, 2.0, 3.0, 5.0, 8.0), (0.0, 0.1, 0.25, 0.5), (0.5, 1.0, 2.0)
+            TITLE_GRID, PARAMS_GRID, DESCRIPTION_GRID
         ):
             fields = [
                 Field("title", title_boost, 0.6),
                 Field("params", params_boost, 0.75),
                 Field("description", description_boost, 0.75),
             ]
-            index.reweight(fields)
-            order, _ = index.search(plain, top_k=TOP_K)
-            predictions = _predictions(order, item_ids, query_ids, TOP_K)
             results.append(
                 {
                     "заголовок": title_boost,
                     "параметры": params_boost,
                     "описание": description_boost,
-                    "Recall@50": recall_at_k(local.relevant, predictions),
+                    "Recall@50": score(fields),
                 }
             )
         table = pd.DataFrame(results).sort_values("Recall@50", ascending=False)
         print(table.head(10).round(4).to_string(index=False))
-        # 60 конфигураций на выборке, где стандартная ошибка метрики около 0.01,
-        # гарантированно дадут победителя, завышенного на шум. Поэтому смотрю
-        # не на первую строку, а на то, вся ли верхушка таблицы лежит в одной области
-        spread = table.head(10)["Recall@50"]
-        print(f"разброс топ-10: {spread.max() - spread.min():.4f} при ошибке метрики около 0.01")
-        top = table.iloc[0]
-        best_fields = [
-            Field("title", float(top["заголовок"]), 0.6),
-            Field("params", float(top["параметры"]), 0.75),
-            Field("description", float(top["описание"]), 0.75),
-        ]
 
-    print(f"\nЛучшие веса: {[(f.name, f.boost) for f in best_fields]}")
-    index.reweight(best_fields)
+        # argmax по такой сетке на выборке со стандартной ошибкой метрики около 0.01
+        # гарантированно завышен на шум, поэтому победитель отсюда не берётся.
+        # Смотрю на другое: лежит ли верхушка таблицы в одной области и попадает ли
+        # в неё то, что зашито в DEFAULT_FIELDS
+        spread = table.head(10)["Recall@50"]
+        print(
+            f"разброс топ-10: {spread.max() - spread.min():.4f} при ошибке метрики около 0.01, "
+            f"то есть это одна точка, а не рейтинг"
+        )
+        chosen = {field.name: field.boost for field in DEFAULT_FIELDS}
+        same_area = table.head(10)[
+            (table.head(10)["заголовок"] >= TITLE_PLATEAU)
+            & (table.head(10)["параметры"] == chosen["params"])
+        ]
+        print(
+            f"решение берёт {chosen}, в первой десятке сетки "
+            f"{len(same_area)} конфигураций из той же области"
+        )
+
+        print("\nНасыщение k1 при весах решения")
+        # k1 задаёт, насколько быстро растущая частота терма перестаёт добавлять скор.
+        # При весе заголовка 20 именно k1 определяет форму насыщения, и до этого
+        # он не подбирался вовсе, стоял по умолчанию
+        k1_table = [{"k1": value, "Recall@50": score(best_fields, value)} for value in K1_GRID]
+        print(pd.DataFrame(k1_table).round(4).to_string(index=False))
+
+    print(f"\nВеса решения: {[(f.name, f.boost) for f in best_fields]}, k1 = {K1}")
+    index.reweight(best_fields, k1=K1)
 
     print("\nФильтр поиска дописан к тексту запроса")
     comparison = []

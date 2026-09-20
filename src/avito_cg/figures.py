@@ -14,6 +14,7 @@ import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 
 ACCENT = "#0a7cff"
 MUTED = "#9aa4b2"
@@ -21,6 +22,7 @@ WARN = "#e8710a"
 
 
 def _setup() -> None:
+    """Общий стиль для всех графиков: одинаковые оси, сетка и размер шрифта"""
     plt.rcParams.update(
         {
             "figure.dpi": 130,
@@ -36,7 +38,7 @@ def _setup() -> None:
     )
 
 
-def _save(fig: plt.Figure, path: Path) -> Path:
+def _save(fig: Figure, path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path)
     plt.close(fig)
@@ -157,7 +159,7 @@ def query_length_shift(train_lengths: np.ndarray, bench_lengths: np.ndarray, pat
     """Запросы бенчмарка длиннее обучающих, и это придётся учесть в валидации"""
     _setup()
     fig, ax = plt.subplots(figsize=(7, 4))
-    bins = np.arange(0.5, 11.5, 1)
+    bins = np.arange(0.5, 11.5, 1).tolist()
     ax.hist(
         np.clip(train_lengths, 0, 10),
         bins=bins,
@@ -254,7 +256,7 @@ def location_sizes(counts: np.ndarray, path: Path) -> Path:
     """Насколько неравномерно объявления разложены по локациям"""
     _setup()
     fig, ax = plt.subplots(figsize=(7, 3.8))
-    ax.hist(counts, bins=np.logspace(0, np.log10(counts.max()), 40), color=ACCENT)
+    ax.hist(counts, bins=np.logspace(0, np.log10(counts.max()), 40).tolist(), color=ACCENT)
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.set_xlabel("объявлений в локации")

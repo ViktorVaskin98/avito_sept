@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -197,11 +197,9 @@ class BM25FIndex:
         directory.mkdir(parents=True, exist_ok=True)
         for name, counts in self._field_counts.items():
             sp.save_npz(directory / f"counts_{name}.npz", counts)
-        np.savez(
-            directory / "vectors.npz",
-            idf=self.idf,
-            **{f"length_{name}": values for name, values in self._field_lengths.items()},
-        )
+        vectors = {"idf": self.idf}
+        vectors.update({f"length_{name}": values for name, values in self._field_lengths.items()})
+        np.savez(directory / "vectors.npz", **vectors)  # type: ignore[arg-type]
         (directory / "vocabulary.json").write_text(
             json.dumps(self.vocabulary, ensure_ascii=False), encoding="utf-8"
         )
@@ -215,6 +213,13 @@ class BM25FIndex:
         k1: float = K1,
         tokenizer: Callable[[str | None], list[str]] = tokenize,
     ) -> BM25FIndex:
+        """Прочитать матрицы частот и достроить веса под переданные поля
+
+        Веса полей и k1 в файл не пишутся: на диске лежит только то, что дорого
+        считать заново - токенизация и частоты. Перевзвешивание занимает секунды,
+        поэтому конфигурация приходит аргументом и индекс можно переиспользовать
+        под разные веса, ничего не перестраивая
+        """
         index = cls(fields, k1=k1, tokenizer=tokenizer)
         index.vocabulary = json.loads((directory / "vocabulary.json").read_text(encoding="utf-8"))
         vectors = np.load(directory / "vectors.npz")
@@ -270,7 +275,9 @@ class BM25FIndex:
         combined.data = combined.data / (self.k1 + combined.data)
         self._matrix = combined.dot(sp.diags(self.idf)).tocsr().astype(np.float32)
 
-    def iter_scores(self, queries: Sequence[str], *, chunk: int = 256):
+    def iter_scores(
+        self, queries: Sequence[str], *, chunk: int = 256
+    ) -> Iterator[tuple[int, sp.csr_matrix]]:
         """Отдавать разреженные строки скоров блоками запросов
 
         Нужно для слияния с другими сигналами: усечённый топ для этого не годится,

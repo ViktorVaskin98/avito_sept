@@ -179,6 +179,9 @@ def facet_report(train: pd.DataFrame) -> dict[str, float]:
     mask = train["search_infm_params_text"].astype(str).str.len() > 0
     rows = train[mask]
     coverage = np.empty(len(rows))
+    # рядом считаю дословное вхождение: оно показывает, почему сравнивать
+    # надо по токенам, а не строками
+    verbatim = np.zeros(len(rows), dtype=bool)
     for index, (filter_text, item_text) in enumerate(
         zip(
             rows["search_infm_params_text"].astype(str),
@@ -186,19 +189,21 @@ def facet_report(train: pd.DataFrame) -> dict[str, float]:
             strict=True,
         )
     ):
-        filter_tokens = set(normalize(filter_text).split())
+        normalized_filter = normalize(filter_text)
+        normalized_item = normalize(item_text)
+        filter_tokens = set(normalized_filter.split())
         if not filter_tokens:
             coverage[index] = np.nan
             continue
-        coverage[index] = len(filter_tokens & set(normalize(item_text).split())) / len(
-            filter_tokens
-        )
+        coverage[index] = len(filter_tokens & set(normalized_item.split())) / len(filter_tokens)
+        verbatim[index] = normalized_filter in normalized_item
     return {
         "пар с непустым фильтром": int(mask.sum()),
         "доля непустых фильтров": float(mask.mean()),
         "среднее покрытие фильтра": float(np.nanmean(coverage)),
         "полное покрытие": float(np.nanmean(coverage == 1)),
         "нулевое покрытие": float(np.nanmean(coverage == 0)),
+        "дословное вхождение": float(verbatim.mean()),
     }
 
 
@@ -329,7 +334,7 @@ def filter_ceiling_report(
     query_lon = located["longitude"].to_numpy(dtype=float)
 
     binary = {"binary": True, "use_idf": False, "norm": None, "token_pattern": r"[0-9a-zа-я]+"}
-    facet_vectorizer = TfidfVectorizer(analyzer="word", **binary)  # type: ignore[arg-type]
+    facet_vectorizer = TfidfVectorizer(analyzer="word", **binary)
     item_facets = facet_vectorizer.fit_transform(
         normalize(text) for text in corpus["item_infm_params_text"].astype(str)
     )

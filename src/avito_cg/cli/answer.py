@@ -16,47 +16,85 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
-from avito_cg.config import PATHS, TOP_K
+from avito_cg.config import DENSE_DEPTH, PATHS, TOP_K
 from avito_cg.data.io import load_benchmark_items, load_benchmark_queries, load_train
 from avito_cg.eval.submission import save_submission
-from avito_cg.index.fields import PARAM_KEYS_FILE, item_fields, load_parser, query_texts
+from avito_cg.index.fields import item_fields, load_parser, query_texts
 from avito_cg.index.geo import GeoIndex
 from avito_cg.index.lexical import DEFAULT_FIELDS, BM25FIndex, Field
 from avito_cg.retrieval.candidates import collect
-from avito_cg.retrieval.fusion import DEFAULT_CONFIG, FusionConfig, retrieve
+from avito_cg.retrieval.fusion import DEFAULT_CONFIG, FusionConfig, pad_with_nearest, retrieve
 from avito_cg.retrieval.signals import (
     DenseSignal,
     FacetSignal,
     GeoSignal,
     MicrocatSignal,
+    Signal,
     load_embeddings,
 )
-from avito_cg.train.reranker import CandidateSet, ItemContext, build_features, predict
+from avito_cg.train.reranker import (
+    CandidateSet,
+    ItemContext,
+    build_features,
+    features_fingerprint,
+    predict,
+    ranked_items,
+)
 
 RERANKER = "reranker.cbm"
 # та же глубина, на которой реранкер обучался и мерился
 RERANK_DEPTH = 200
+DEFAULT_WEIGHTS = {"гео": 0.10, "фасеты": 0.10, "микрокатегория": 0.02, "плотный": 0.5}
+
+
+def _load_cached_features(cache: Path, fingerprint: str) -> CandidateSet | None:
+    """Таблица признаков из кэша, если она собрана под ту же конфигурацию
+
+    У файлов, записанных до появления отпечатка, его нет. Такой кэш считаю
+    несовпадающим и пересобираю: тихо взять таблицу неизвестного происхождения
+    хуже, чем потратить семь минут
+    """
+    if not cache.exists():
+        return None
+    stored = np.load(cache)
+    saved = str(stored["fingerprint"]) if "fingerprint" in stored else ""
+    if saved != fingerprint:
+        print(
+            f"кэш {cache.name} собран под другую конфигурацию "
+            f"({saved or 'отпечатка нет'} против {fingerprint}), пересобираю",
+            flush=True,
+        )
+        return None
+    print(f"таблица признаков из кэша {cache.name}, строк {len(stored['label'])}", flush=True)
+    return CandidateSet(
+        query=stored["query"],
+        item=stored["item"],
+        features=stored["features"],
+        label=stored["label"],
+    )
 
 
 def _reranked(
-    index,
-    signals,
-    texts,
-    items,
-    queries,
-    pairs,
-    model_path,
+    index: BM25FIndex,
+    signals: Sequence[tuple[Signal, float]],
+    texts: Sequence[str],
+    items: pd.DataFrame,
+    queries: pd.DataFrame,
+    pairs: pd.DataFrame,
+    model_path: Path,
     *,
-    coordinates,
-    extra,
-    config,
-    top_k,
-):
+    coordinates: tuple[np.ndarray, np.ndarray],
+    extra: np.ndarray | None,
+    config: FusionConfig,
+    top_k: int,
+    fingerprint: str,
+) -> np.ndarray:
     """Выдача после переранжирования обученной на локальном бенчмарке моделью
 
     Кандидаты собираю тем же collect, что и при замере: признаки должны считаться
@@ -66,19 +104,9 @@ def _reranked(
     from catboost import CatBoostClassifier, CatBoostRanker
 
     query_ids = queries["query_id"].astype(str).tolist()
-    # сбор кандидатов по настоящему корпусу это семь минут, а смена модели секунды.
-    # Кэш привязан к набору признаков: поменял FEATURES - удали файл
     cache = PATHS.artifacts / "rerank_benchmark.npz"
-    if cache.exists():
-        stored = np.load(cache)
-        data = CandidateSet(
-            query=stored["query"],
-            item=stored["item"],
-            features=stored["features"],
-            label=stored["label"],
-        )
-        print(f"таблица признаков из кэша {cache.name}, строк {len(data.label)}", flush=True)
-    else:
+    data = _load_cached_features(cache, fingerprint)
+    if data is None:
         collected = collect(
             index, signals, texts, depth=RERANK_DEPTH, config=config, extra_candidates=extra
         )
@@ -101,6 +129,7 @@ def _reranked(
             label=data.label,
             query=data.query,
             item=data.item,
+            fingerprint=fingerprint,
         )
 
     kind = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
@@ -109,15 +138,7 @@ def _reranked(
     print(f"переранжирование моделью «{kind['имя']}», {kind['objective']}", flush=True)
     scores = predict(model, data.features)
 
-    order = np.full((len(query_ids), top_k), -1, dtype=np.int64)
-    ranked = np.lexsort((-scores, data.query))
-    filled = np.zeros(len(query_ids), dtype=np.int64)
-    for position in ranked:
-        query = data.query[position]
-        if filled[query] < top_k:
-            order[query, filled[query]] = data.item[position]
-            filled[query] += 1
-    return order
+    return ranked_items(data, scores, len(query_ids), top_k=top_k)
 
 
 def run(
@@ -126,14 +147,30 @@ def run(
     output: Path | None = None,
     with_filter: bool = False,
     fusion: FusionConfig | None = DEFAULT_CONFIG,
-    weights: dict[str, float] | None = None,
+    weights: Mapping[str, float] | None = None,
     top_k: int = TOP_K,
     rerank: bool = True,
+    dense_depth: int = DENSE_DEPTH,
 ) -> Path:
+    """Собрать answer.csv по настоящему корпусу и проверить его формат
+
+    Порядок ровно такой же, как в замерах на локальном бенчмарке, и это главное
+    требование к этой функции: отправляется то, что мерилось, а не «примерно то же».
+    Отличий от локального прогона всего два, и оба вынужденные. Первое: гео, фасеты
+    и микрокатегория учатся на всех обучающих парах, а не на fit_pairs - прятать
+    отложенные запросы тут не от кого, их на этой стороне нет. Второе: переранжировщик
+    приезжает готовым, обученным командой rerank на локальном бенчмарке, потому что
+    разметки бенчмарка у нас нет и обучать на ней нечего.
+
+    Каждый шаг переживает отсутствие своего артефакта: нет эмбеддингов - выдача
+    собирается без плотного сигнала, нет модели - без переранжирования. Про это
+    печатается предупреждение, потому что молча отдать версию на три пункта хуже -
+    худшее, что тут может произойти
+    """
     PATHS.ensure()
     destination = output or PATHS.submissions / "answer.csv"
     # подобраны на локальном бенчмарке покоординатным спуском, см. docs/EXPERIMENTS.md
-    weights = weights or {"гео": 0.10, "фасеты": 0.10, "микрокатегория": 0.02, "плотный": 0.5}
+    weights = dict(DEFAULT_WEIGHTS) if weights is None else dict(weights)
 
     started = time.time()
     items = load_benchmark_items()
@@ -143,9 +180,7 @@ def run(
         f"{len(items)} объявлений, {len(queries)} запросов"
     )
 
-    parser = load_parser(
-        items["item_infm_params_text"].astype(str).tolist(), PATHS.interim / PARAM_KEYS_FILE
-    )
+    parser = load_parser()
 
     cache = PATHS.artifacts / "lexical_benchmark"
     started = time.time()
@@ -176,7 +211,7 @@ def run(
             ]
         )
         geo = GeoIndex.fit(train, items)
-        signals = [
+        signals: list[tuple[Signal, float]] = [
             (GeoSignal.build(geo, queries), weights["гео"]),
             (FacetSignal.build(queries, items, train), weights["фасеты"]),
             (MicrocatSignal.build(queries, items, train), weights["микрокатегория"]),
@@ -210,7 +245,7 @@ def run(
             signals.append((dense, weights["плотный"]))
             # плотный поиск не только переупорядочивает, но и приводит кандидатов,
             # до которых лексика не дотягивается вовсе
-            extra = dense.top_candidates(top_k=200)
+            extra = dense.top_candidates(top_k=dense_depth)
         elif weights.get("плотный"):
             print(f"эмбеддингов нет в {embeddings}, плотный сигнал пропускаю", flush=True)
         latitude, longitude = geo.query_coordinates(queries["search_location_id"].to_numpy())
@@ -231,7 +266,20 @@ def run(
                 extra=extra,
                 config=fusion,
                 top_k=top_k,
+                fingerprint=features_fingerprint(
+                    [(field.name, field.boost, field.b) for field in fields],
+                    weights,
+                    k1=index.k1,
+                    mode=fusion.mode,
+                    depth=RERANK_DEPTH,
+                    dense_depth=dense_depth,
+                ),
             )
+            # то же, что делает retrieve: пустой слот в ответе это чистая потеря,
+            # а метрика за лишних кандидатов не штрафует. Сейчас не срабатывает,
+            # потому что плотный поиск докидывает кандидатов каждому запросу,
+            # но эта защита не должна зависеть от того, включён ли он
+            pad_with_nearest(order, geo, latitude, longitude, top_k)
         else:
             if rerank:
                 print(f"без переранжирования, порядок слияния ({model_path})", flush=True)

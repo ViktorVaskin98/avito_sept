@@ -16,7 +16,7 @@ import time
 import numpy as np
 import pandas as pd
 
-from avito_cg.config import PATHS, TOP_K
+from avito_cg.config import DENSE_DEPTH, PATHS, TOP_K
 from avito_cg.data.io import load_train
 from avito_cg.eval.benchmark import LocalBenchmark
 from avito_cg.eval.metrics import (
@@ -35,6 +35,7 @@ from avito_cg.retrieval.signals import (
     FacetSignal,
     GeoSignal,
     MicrocatSignal,
+    Signal,
     load_embeddings,
 )
 
@@ -56,11 +57,16 @@ GRIDS = {
 START = {"гео": 0.10, "фасеты": 0.10, "микрокатегория": 0.02, "плотный": 0.0}
 EMBEDDINGS = "embeddings_local.npy"
 ENCODER = "encoder"
-DENSE_DEPTH = 200
 QUERY_VECTORS = "query_vectors_local.npy"
 
 
 def run(*, top_k: int = TOP_K) -> None:
+    """Подобрать веса сигналов покоординатным спуском и замерить глубину кандидатов
+
+    Стартую с гео и добавляю по одному сигналу, каждый раз проверяя прирост парным
+    бутстрэпом. Порядок в GRIDS не случаен: гео переподбирается последним, уже после
+    того как остальные сигналы заняли свою долю скора
+    """
     PATHS.ensure()
     started = time.time()
     train = load_train(columns=TRAIN_COLUMNS)
@@ -69,7 +75,8 @@ def run(*, top_k: int = TOP_K) -> None:
     pairs = local.fit_pairs(train)
 
     geo = GeoIndex.fit(pairs, corpus)
-    signals = {
+    dense: DenseSignal | None = None
+    signals: dict[str, Signal] = {
         "гео": GeoSignal.build(geo, local.queries),
         "фасеты": FacetSignal.build(local.queries, corpus, pairs),
         "микрокатегория": MicrocatSignal.build(local.queries, corpus, pairs),
@@ -99,7 +106,8 @@ def run(*, top_k: int = TOP_K) -> None:
                 device="cpu",
             )
             np.save(cache, query_vectors)
-        signals["плотный"] = DenseSignal(query_vectors=query_vectors, item_vectors=item_vectors)
+        dense = DenseSignal(query_vectors=query_vectors, item_vectors=item_vectors)
+        signals["плотный"] = dense
     else:
         print(f"эмбеддингов нет в {embeddings}, плотный сигнал пропускаю", flush=True)
 
@@ -113,6 +121,7 @@ def run(*, top_k: int = TOP_K) -> None:
     def rank(
         weights: dict[str, float], depth: int, extra: np.ndarray | None = None
     ) -> dict[str, list[str]]:
+        """Выдача при заданных весах, в виде «query_id -> список item_id»"""
         order = retrieve(
             index,
             [(signals[name], weight) for name, weight in weights.items()],
@@ -164,10 +173,10 @@ def run(*, top_k: int = TOP_K) -> None:
     # меряю отдельным замером: 3.0% пар по разбору данных не имеют с объявлением ни одного
     # общего токена, лексика их не находит в принципе, и переупорядочивание тут бессильно
     extra = None
-    if "плотный" in signals and weights.get("плотный"):
+    if dense is not None and weights.get("плотный"):
         print("\nПлотный поиск как источник кандидатов", flush=True)
         started_dense = time.time()
-        extra = signals["плотный"].top_candidates(top_k=DENSE_DEPTH)
+        extra = dense.top_candidates(top_k=DENSE_DEPTH)
         print(f"  топ-{DENSE_DEPTH} по косинусу за {time.time() - started_dense:.0f} c", flush=True)
 
         with_extra = rank(weights, top_k, extra)

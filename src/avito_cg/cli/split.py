@@ -26,6 +26,13 @@ SPLIT_DIR = "local_benchmark"
 def _sanity_baselines(
     local: bm.LocalBenchmark, train: pd.DataFrame, top_k: int = TOP_K
 ) -> pd.DataFrame:
+    """Две тривиальные модели, которые проверяют не качество, а сходимость цепочки
+
+    Случайные 50 обязаны дать примерно 50/189212: если там окажется 0.01, значит
+    в корпусе слишком мало дистракторов или в разметку затекли лишние объявления.
+    Ближайшие по расстоянию обязаны дать заметно больше: это отправная точка,
+    с которой сравнивается всё дальнейшее
+    """
     corpus = local.corpus(
         train, columns=["item_id", "item_latitude", "item_longitude", "item_location_id"]
     )
@@ -74,6 +81,12 @@ def _sanity_baselines(
 
 
 def run(*, sanity: bool = True, seen_share: float = bm.SEEN_SHARE, seed: int = RANDOM_SEED) -> None:
+    """Собрать локальный бенчмарк, сверить его с настоящим и проверить на утечки
+
+    Сплит без проверки самого сплита ничего не стоит, поэтому команда не только
+    собирает, но и печатает сверку по всем величинам, которые я умею мерить,
+    список претензий к утечкам и две контрольные модели
+    """
     PATHS.ensure()
     started = time.time()
     train = load_train()

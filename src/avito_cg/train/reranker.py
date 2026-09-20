@@ -24,8 +24,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -75,6 +78,36 @@ FEATURES = [
     "телефон_скрыт",
     "сообщения_запрещены",
 ]
+
+
+def features_fingerprint(
+    fields: Sequence[tuple[str, float, float]],
+    weights: Mapping[str, float],
+    *,
+    k1: float,
+    mode: str,
+    depth: int,
+    dense_depth: int,
+) -> str:
+    """Отпечаток всего, от чего зависит таблица признаков
+
+    Сбор кандидатов это семь минут на две с половиной тысячи запросов, поэтому
+    таблица кэшируется. Кэш без привязки к конфигурации опаснее, чем отсутствие кэша:
+    поменял вес поля, команда отработала за минуту и выдала ровно тот же результат,
+    что и до правки, потому что признаки приехали из файла, собранного под старые веса.
+    Молча. Поэтому отпечаток кладётся внутрь файла и сверяется при чтении
+    """
+    payload = {
+        "fields": [list(field) for field in fields],
+        "k1": k1,
+        "weights": sorted(weights.items()),
+        "mode": mode,
+        "depth": depth,
+        "dense_depth": dense_depth,
+        "features": list(FEATURES),
+    }
+    digest = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.blake2b(digest.encode("utf-8"), digest_size=8).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +214,7 @@ class CandidateSet:
 def build_features(
     candidates: Sequence[np.ndarray],
     lexical: Sequence[np.ndarray],
-    signal_scores: dict[str, Sequence[np.ndarray]],
+    signal_scores: Mapping[str, Sequence[np.ndarray]],
     queries: pd.DataFrame,
     context: ItemContext,
     index: BM25FIndex,
@@ -306,6 +339,31 @@ def build_features(
     )
 
 
+def ranked_items(
+    data: CandidateSet,
+    scores: np.ndarray | None,
+    n_queries: int,
+    *,
+    top_k: int,
+) -> np.ndarray:
+    """Матрица «запрос на top_k» с номерами строк корпуса, -1 на пустых местах
+
+    scores=None означает «оставить порядок строк как есть»: collect кладёт кандидатов
+    запроса подряд и уже по убыванию скора слияния, так что это выдача до переранжирования.
+    Одна функция на все места, где нужен топ внутри запроса - раньше их было четыре,
+    и каждая могла разъехаться со своей копией
+    """
+    order = np.full((n_queries, top_k), -1, dtype=np.int64)
+    filled = np.zeros(n_queries, dtype=np.int64)
+    rows = range(len(data.query)) if scores is None else np.lexsort((-scores, data.query))
+    for row in rows:
+        query = int(data.query[row])
+        if filled[query] < top_k:
+            order[query, filled[query]] = data.item[row]
+            filled[query] += 1
+    return order
+
+
 def _ranks(scores: np.ndarray) -> np.ndarray:
     order = np.empty(scores.size, dtype=np.float64)
     order[np.argsort(-scores)] = np.arange(scores.size)
@@ -327,7 +385,7 @@ def cross_validated_scores(
     *,
     folds: int = 5,
     seed: int = RANDOM_SEED,
-    **kwargs,
+    **kwargs: Any,
 ) -> np.ndarray:
     """Скор реранкера для каждого кандидата, полученный моделью, его не видевшей
 

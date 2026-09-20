@@ -26,13 +26,24 @@ def _cmd_check_data(_: argparse.Namespace) -> int:
     sources = (PATHS.train, PATHS.benchmark_items, PATHS.benchmark_queries)
     missing = [path for path in sources if not path.exists()]
     if missing:
+        print(f"корень проекта: {PATHS.root}", file=sys.stderr)
         print("не найдены файлы:", file=sys.stderr)
         for path in missing:
             print(f"  {path}", file=sys.stderr)
-        print(
-            "\nскачай архив по ссылке из docs/TASK.md и распакуй содержимое в data/raw/",
-            file=sys.stderr,
-        )
+        if not (PATHS.root / "pyproject.toml").exists():
+            # пакет поставлен не в editable-режиме: корень уехал в site-packages
+            # вместе с ним, и data/raw ищется совсем не там, где лежит
+            print(
+                "\nкорень не похож на репозиторий, в нём нет pyproject.toml. "
+                "Похоже, пакет установлен не через `pip install -e`.\n"
+                "Укажи корень явно: AVITO_CG_ROOT=/путь/к/репозиторию",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "\nскачай архив по ссылке из docs/TASK.md и распакуй содержимое в data/raw/",
+                file=sys.stderr,
+            )
         return 1
 
     for path in sources:
@@ -92,9 +103,19 @@ def _cmd_baseline(args: argparse.Namespace) -> int:
 
 def _cmd_answer(args: argparse.Namespace) -> int:
     """Собрать answer.csv по настоящему корпусу"""
-    from avito_cg.cli.answer import run
+    from avito_cg.cli.answer import DEFAULT_WEIGHTS, run
     from avito_cg.index.lexical import Field
     from avito_cg.retrieval.fusion import FusionConfig
+
+    weights = dict(DEFAULT_WEIGHTS)
+    for name, value in (
+        ("гео", args.geo_weight),
+        ("фасеты", args.facet_weight),
+        ("микрокатегория", args.microcat_weight),
+        ("плотный", args.dense_weight),
+    ):
+        if value is not None:
+            weights[name] = value
 
     run(
         fields=[
@@ -104,9 +125,67 @@ def _cmd_answer(args: argparse.Namespace) -> int:
         ],
         output=args.out,
         with_filter=args.with_filter,
-        fusion=None if args.no_geo else FusionConfig(mode=args.fusion, geo_weight=args.geo_weight),
+        fusion=None if args.no_geo else FusionConfig(mode=args.fusion),
+        weights=weights,
         rerank=not args.no_rerank,
+        dense_depth=args.dense_depth,
     )
+    return 0
+
+
+def _cmd_param_keys(args: argparse.Namespace) -> int:
+    """Сверить закреплённый словарь ключей параметров со свежевыведенным
+
+    Печатает оба, чтобы было видно цену закрепления: словарь в пакете держит
+    воспроизводимость, а выведенный заново по корпусу может разбирать чуть лучше.
+    Менять закреплённый имеет смысл только вместе с пересборкой всей цепочки
+    """
+    from avito_cg.data.io import load_benchmark_items
+    from avito_cg.data.params import ParamsParser
+    from avito_cg.index.fields import PINNED_KEYS, discover_parser, load_parser
+
+    texts = (
+        load_benchmark_items(columns=["item_infm_params_text"])["item_infm_params_text"]
+        .fillna("")
+        .astype(str)
+        .tolist()
+    )
+    nonempty = [text for text in texts if text]
+
+    def coverage(parser: ParamsParser) -> float:
+        return sum(parser.coverage(text) == 1.0 for text in nonempty) / len(nonempty)
+
+    pinned = load_parser()
+    fresh = discover_parser(texts, sample=args.sample, seed=args.seed)
+    print(f"строк с непустыми параметрами: {len(nonempty)}")
+    print(
+        f"  закреплённый: {len(pinned.keys):3d} ключей, разобрано от первого токена "
+        f"{coverage(pinned):.4f}"
+    )
+    print(
+        f"  выведенный:   {len(fresh.keys):3d} ключей, разобрано от первого токена "
+        f"{coverage(fresh):.4f}"
+    )
+    only_fresh = sorted(set(fresh.keys) - set(pinned.keys))
+    only_pinned = sorted(set(pinned.keys) - set(fresh.keys))
+    print(f"  есть только в выведенном ({len(only_fresh)}): {only_fresh[:5]}")
+    print(f"  есть только в закреплённом ({len(only_pinned)}): {only_pinned[:5]}")
+
+    if args.write:
+        fresh.save(PINNED_KEYS)
+        print(f"\nсловарь перезаписан: {PINNED_KEYS}")
+        print("теперь надо удалить индексы и таблицы признаков в data/artifacts")
+        print("и пересобрать всю цепочку: поле params, а с ним и ответ, изменились")
+    else:
+        print(f"\nничего не записано, для перезаписи нужен --write ({PINNED_KEYS})")
+    return 0
+
+
+def _cmd_errors(args: argparse.Namespace) -> int:
+    """Разбор промахов финальной конфигурации на локальном бенчмарке"""
+    from avito_cg.cli.errors import run
+
+    run(top_k=args.top_k)
     return 0
 
 
@@ -169,6 +248,11 @@ def _cmd_encode(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Одна подкоманда на шаг пайплайна, в порядке их выполнения
+
+    Импорты внутри обработчиков, а не наверху модуля, намеренно: `avito-cg check-data`
+    не должен тянуть torch и catboost ради проверки, что три parquet лежат на месте
+    """
     parser = argparse.ArgumentParser(prog="avito-cg", description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -241,10 +325,26 @@ def build_parser() -> argparse.ArgumentParser:
         default="normalized",
         help="как согласовывать масштабы лексики и гео",
     )
-    answer.add_argument("--geo-weight", type=float, default=0.10, help="вес гео в скоре")
+    answer.add_argument("--geo-weight", type=float, default=None, help="вес гео в скоре")
+    answer.add_argument("--facet-weight", type=float, default=None, help="вес фасетов")
+    answer.add_argument("--microcat-weight", type=float, default=None, help="вес микрокатегории")
+    answer.add_argument("--dense-weight", type=float, default=None, help="вес плотного поиска")
+    answer.add_argument(
+        "--dense-depth", type=int, default=200, help="сколько кандидатов приводит плотный поиск"
+    )
     answer.add_argument("--no-rerank", action="store_true", help="не применять переранжировщик")
     answer.add_argument("--out", type=_resolve, default=None)
     answer.set_defaults(func=_cmd_answer)
+
+    errors = subparsers.add_parser("errors", help="разбор промахов на локальном бенчмарке")
+    errors.add_argument("--top-k", type=int, default=50)
+    errors.set_defaults(func=_cmd_errors)
+
+    keys = subparsers.add_parser("param-keys", help="пересобрать словарь ключей параметров")
+    keys.add_argument("--sample", type=int, default=20000, help="сколько объявлений смотреть")
+    keys.add_argument("--seed", type=int, default=0)
+    keys.add_argument("--write", action="store_true", help="перезаписать закреплённый словарь")
+    keys.set_defaults(func=_cmd_param_keys)
 
     validate = subparsers.add_parser("validate-answer", help="проверить формат answer.csv")
     validate.add_argument("path", type=_resolve)

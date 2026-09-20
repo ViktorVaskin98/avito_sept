@@ -14,9 +14,10 @@
 # как `/kaggle/input/avito-sept`.
 
 # %% ячейка 1: репозиторий
-# GIT_TERMINAL_PROMPT=0 обязателен: у приватного репозитория git спросит логин,
+# GIT_TERMINAL_PROMPT=0 обязателен: если репозиторий закрыт, git спросит логин,
 # отвечать ему в ноутбуке некому, и ячейка зависнет навсегда без сообщений
-# !GIT_TERMINAL_PROMPT=0 git clone -q https://github.com/ViktorVaskin98/avito_sept.git /kaggle/working/avito
+# REPO = "https://github.com/<логин>/avito_sept.git"
+# !GIT_TERMINAL_PROMPT=0 git clone -q $REPO /kaggle/working/avito
 # !pip install -q -e /kaggle/working/avito
 
 # %% ячейка 2: подключение данных

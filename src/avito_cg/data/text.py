@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Sequence
 from functools import lru_cache
-
-import pandas as pd
 
 try:
     import Stemmer as _snowball  # noqa: N813
@@ -66,6 +63,12 @@ def tokenize(
     drop_stopwords: bool = True,
     min_length: int = MIN_TOKEN_LENGTH,
 ) -> list[str]:
+    """Нормализация, стоп-слова, отсев коротышей и стемминг - в этом порядке
+
+    Стемминг последним: стоп-лист и длина считаются по исходным словам, иначе
+    «его» после стемминга перестанет совпадать со стоп-листом. Один и тот же
+    токенизатор обязан применяться и к корпусу, и к запросу, поэтому он тут один
+    """
     tokens = normalize(text).split()
     if drop_stopwords:
         tokens = [token for token in tokens if token not in STOPWORDS]
@@ -74,42 +77,6 @@ def tokenize(
     if do_stem:
         tokens = [stem(token) for token in tokens]
     return tokens
-
-
-def char_ngrams(text: str | None, sizes: Sequence[int] = (3, 4, 5)) -> list[str]:
-    """Символьные n-граммы по словам с граничными маркерами
-
-    Маркер _ на краях слова не даёт n-грамме склеиться через пробел и заодно отличает
-    начало слова от середины, для пары «ремонт» и «капремонт» это важно
-    """
-    normalized = normalize(text)
-    if not normalized:
-        return []
-    grams: list[str] = []
-    for word in normalized.split():
-        padded = f"_{word}_"
-        for size in sizes:
-            if len(padded) < size:
-                continue
-            grams.extend(padded[start : start + size] for start in range(len(padded) - size + 1))
-    return grams
-
-
-def normalize_series(series: pd.Series) -> pd.Series:
-    return pd.Series(
-        [normalize(value) for value in series.astype("string").fillna("")], index=series.index
-    )
-
-
-def join_fields(*fields: Iterable[str | None]) -> list[str]:
-    """Склеить несколько текстовых колонок построчно, пропуская пустые значения"""
-    columns = [list(field) for field in fields]
-    length = len(columns[0])
-    if any(len(column) != length for column in columns):
-        raise ValueError("колонки разной длины")
-    return [
-        " ".join(str(column[row]) for column in columns if column[row]) for row in range(length)
-    ]
 
 
 def truncate(text: str | None, max_chars: int) -> str:

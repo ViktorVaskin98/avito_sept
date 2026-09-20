@@ -160,6 +160,12 @@ class LocalBenchmark:
         return train.iloc[self.fit_rows]
 
     def save(self, directory: Path) -> None:
+        """Разложить сплит по файлам: запросы, разметка, корпус, разрешённые строки
+
+        Корпус и обучающая часть хранятся идентификаторами и номерами строк, а не
+        содержимым: материализуются они из того же train.parquet, а копия его
+        подмножества весила бы сотни мегабайт на ровном месте
+        """
         directory.mkdir(parents=True, exist_ok=True)
         self.queries.to_parquet(directory / "queries.parquet", index=False)
         pd.DataFrame(
@@ -179,6 +185,7 @@ class LocalBenchmark:
 
     @classmethod
     def load(cls, directory: Path) -> LocalBenchmark:
+        """Собрать сплит обратно, включая разметку «запрос -> релевантные объявления»"""
         relevant: defaultdict[str, set[str]] = defaultdict(set)
         for query_id, item_id in pd.read_parquet(directory / "relevant.parquet").itertuples(
             index=False

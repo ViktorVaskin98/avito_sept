@@ -249,12 +249,6 @@ class ParsedParams:
         found = self.values.get(key)
         return found[0] if found else ""
 
-    def flat_text(self, keys: Sequence[str] | None = None) -> str:
-        """Склеить значения выбранных ключей, для подачи в текстовый индекс"""
-        selected = keys if keys is not None else self.order
-        parts = [value for key in selected for value in self.values.get(key, []) if value]
-        return " ".join(parts)
-
 
 class ParamsParser:
     """Жадный разбор по самому длинному совпадению из словаря ключей"""
@@ -278,6 +272,13 @@ class ParamsParser:
         return None
 
     def parse(self, text: str | None) -> ParsedParams:
+        """Разобрать слипшуюся строку параметров на пары «ключ - значения»
+
+        Жадно, по самому длинному совпадению из словаря: «Время работы, с» должно
+        победить «Время работы». Всё между двумя ключами считается значением
+        предыдущего, повторы ключа накапливаются списком, а ключ без значения
+        даёт пустую строку - это булев флаг вроде «Предоплата»
+        """
         if not text:
             return ParsedParams({}, ())
         tokens = _tokenize(text)

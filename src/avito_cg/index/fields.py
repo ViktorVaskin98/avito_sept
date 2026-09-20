@@ -22,27 +22,48 @@ import pandas as pd
 from avito_cg.data.params import ADDRESS_KEY, ParamsParser, build_parser
 from avito_cg.data.text import truncate
 
-PARAM_KEYS_FILE = "param_keys.json"
 DISCOVERY_SAMPLE = 20_000
 
+# Словарь ключей закреплён в пакете, а не собирается на лету в каждой команде, и это
+# осознанное решение, а не кэш ради скорости.
+#
+# Поиск ключей детерминирован только при фиксированном входе, а вход у разных команд
+# разный: make-answer видит benchmark_items, baseline - локальный корпус из train,
+# encode-corpus - то один, то другой. На этих трёх источниках словарь получается
+# на 99, 92 и 96 ключей соответственно, и расходятся они на три десятка ключей.
+# Пока файл лежал в data/interim, его содержимое зависело от того, какую команду
+# запустили первой, а вместе с ним - поле params индекса, скоры BM25F и итоговый
+# answer.csv. То есть повторный прогон с чистого листа давал другой ответ.
+#
+# Поэтому словарь версионируется вместе с кодом: он такой же артефакт решения,
+# как веса полей. Пересобрать его можно командой `avito-cg param-keys`, она пишет
+# файл на место этого, и тогда индексы надо пересобрать тоже
+PINNED_KEYS = Path(__file__).resolve().parent.parent / "data" / "param_keys.json"
 
-def load_parser(
-    texts: Sequence[str], cache: Path, *, sample: int = DISCOVERY_SAMPLE, seed: int = 0
-) -> ParamsParser:
-    """Достать словарь ключей из кэша или построить заново
 
-    Поиск ключей занимает около полуминуты на выборке в 20 тысяч объявлений,
-    и результат детерминирован, так что держу его на диске
+def load_parser() -> ParamsParser:
+    """Закреплённый словарь ключей параметров
+
+    Аргументов нет намеренно: словарь не выводится из корпуса, который сейчас
+    в руках, а читается из пакета. Раньше он выводился, и это ломало
+    воспроизводимость - почему, написано выше
     """
-    if cache.exists():
-        return ParamsParser.load(cache)
+    return ParamsParser.load(PINNED_KEYS)
 
+
+def discover_parser(
+    texts: Sequence[str], *, sample: int = DISCOVERY_SAMPLE, seed: int = 0
+) -> ParamsParser:
+    """Заново вывести словарь ключей из текстов параметров
+
+    Занимает около полуминуты на выборке в 20 тысяч объявлений. Результат
+    детерминирован при фиксированных texts, sample и seed
+    """
     started = time.time()
     pool = pd.Series([text for text in texts if text])
     if len(pool) > sample:
         pool = pool.sample(sample, random_state=seed)
     parser = build_parser(pool.tolist())
-    parser.save(cache)
     print(f"словарь параметров: {len(parser.keys)} ключей за {time.time() - started:.0f} c")
     return parser
 
@@ -148,6 +169,7 @@ def encoder_texts(
     *,
     description_chars: int = ENCODER_DESCRIPTION_CHARS,
     max_value_share: float = 0.2,
+    common: set[str] | None = None,
 ) -> list[str]:
     """Текст объявления для би-энкодера
 
@@ -160,6 +182,12 @@ def encoder_texts(
     Вторая: у BM25 частые термы сами получают низкий вес через idf, а у энкодера такого
     механизма нет, каждый токен занимает место в окне на равных. Поэтому значения,
     которые стоят у слишком многих объявлений, отсюда выбрасываются
+
+    common передаётся снаружи там, где items это пары, а не корпус: в парах популярное
+    объявление лежит десятки раз, и доля объявлений со значением считается неправильно.
+    Одно и то же объявление обязано давать один и тот же текст при обучении и при
+    кодировании корпуса, иначе энкодер учится на одном распределении, а применяется
+    к другому
     """
     titles = items["item_title_raw"].fillna("").astype(str).tolist()
     values = params_values(
@@ -167,7 +195,8 @@ def encoder_texts(
         items["item_infm_params_text"].fillna("").astype(str).tolist(),
         include_address=False,
     )
-    common = frequent_values(values, max_share=max_value_share)
+    if common is None:
+        common = frequent_values(values, max_share=max_value_share)
     descriptions = items["item_description_raw"].fillna("").astype(str).tolist()
 
     return [
