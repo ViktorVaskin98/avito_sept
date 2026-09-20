@@ -128,7 +128,9 @@ def _cmd_answer(args: argparse.Namespace) -> int:
         fusion=None if args.no_geo else FusionConfig(mode=args.fusion),
         weights=weights,
         rerank=not args.no_rerank,
-        dense_depth=args.dense_depth,
+        # None означает «как в config», иначе значение по умолчанию пришлось бы
+        # держать в двух местах, и однажды они разъехались бы молча
+        **({} if args.dense_depth is None else {"dense_depth": args.dense_depth}),
     )
     return 0
 
@@ -330,7 +332,10 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("--microcat-weight", type=float, default=None, help="вес микрокатегории")
     answer.add_argument("--dense-weight", type=float, default=None, help="вес плотного поиска")
     answer.add_argument(
-        "--dense-depth", type=int, default=200, help="сколько кандидатов приводит плотный поиск"
+        "--dense-depth",
+        type=int,
+        default=None,
+        help="сколько кандидатов приводит плотный поиск, по умолчанию из config",
     )
     answer.add_argument("--no-rerank", action="store_true", help="не применять переранжировщик")
     answer.add_argument("--out", type=_resolve, default=None)

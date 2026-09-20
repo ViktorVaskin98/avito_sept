@@ -76,3 +76,29 @@ def test_relative_links_resolve(doc: Path):
         elif anchor and anchor not in anchors(destination):
             broken.append(f"[{label}]({target}): нет якоря")
     assert not broken, f"{doc.name}: {broken}"
+
+
+def test_no_flag_duplicates_a_config_constant():
+    """Умолчание флага не должно дублировать константу из config
+
+    Именно на этом решение один раз молча собралось не в той конфигурации: константа
+    переехала в config, а у флага осталось своё старое значение по умолчанию, и оно
+    перебило конфиг. Отпечаток при этом совпал со старым кэшем, признаки приехали
+    от предыдущей конфигурации, а модель применилась новая. Ничего не упало.
+    """
+    from avito_cg import config
+
+    numeric = {
+        name: value
+        for name, value in vars(config).items()
+        if isinstance(value, int) and not isinstance(value, bool) and name.isupper()
+    }
+    defaults = build_parser().parse_args(["make-answer"])
+    clashing = [
+        f"--{key.replace('_', '-')}={value} дублирует config.{name}"
+        for key, value in vars(defaults).items()
+        if isinstance(value, int) and not isinstance(value, bool)
+        for name, constant in numeric.items()
+        if constant == value and key.replace("_", "") in name.lower().replace("_", "")
+    ]
+    assert not clashing, clashing
